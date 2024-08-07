@@ -4,7 +4,7 @@ name: cluster-api-events
 appVersion: "[[ .AppVersion ]]"
 version: "[[ .Version ]]"
 
-description: Operator for sending cluster events. 
+description: Operator for sending cluster events.
 
 home: https://github.com/giantswarm/cluster-api-events
 annotations:
