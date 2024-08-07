@@ -1,0 +1,37 @@
+name: cluster-api-events
+serviceType: managed
+
+project:
+  branch: "[[ .Branch ]]"
+  commit: "[[ .SHA ]]"
+
+image:
+  registry: gsoci.azurecr.io
+  name: giantswarm/cluster-api-events
+  tag: "[[ .Version ]]"
+  pullPolicy: IfNotPresent
+
+pod:
+  user:
+    id: "65532"
+  group:
+    id: "65532"
+
+# Add seccomp to pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Add seccomp to container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  seccompProfile:
+    type: RuntimeDefault
+  capabilities:
+    drop:
+      - ALL
+
+global:
+  podSecurityStandards:
+    enforced: false
