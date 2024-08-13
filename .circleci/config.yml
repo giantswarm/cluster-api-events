@@ -31,7 +31,7 @@ workflows:
           app_catalog_test: "control-plane-test-catalog"
           chart: "cluster-api-events"
           requires:
-            - push-to-registries
+            - go-build
           filters:
             tags:
               only: /^v.*/
@@ -43,7 +43,6 @@ workflows:
           app_collection_repo: "capa-app-collection"
           requires:
             - push-to-app-catalog
-            - push-to-registries
           filters:
             branches:
               ignore: /.*/
@@ -57,7 +56,6 @@ workflows:
           app_collection_repo: "capz-app-collection"
           requires:
             - push-to-app-catalog
-            - push-to-registries
           filters:
             branches:
               ignore: /.*/
