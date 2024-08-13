@@ -107,10 +107,13 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// check last known "Ready" transition time for the cluster
-	if !isLastKnownTransitionTimePresent(cluster) {
-		updateLastKnownTransitionTime(cluster, readyTransitionTime)
-	}
+	clusterKey := fmt.Sprintf("%s/%s", cluster.Namespace, cluster.Name)
+	isFirstTime := !isLastKnownTransitionTimePresent(cluster)
 
+	if isFirstTime {
+        // Update the last known transition time for the first time
+        updateLastKnownTransitionTime(cluster, readyTransitionTime)
+    } else {
 	// if cluster is "Ready" (marked as true) and lastTransitionTime of type "Ready" is newer than our stored lastKnownTransition time => send "Upgrade" event
 	sendUpgradeEvent := isClusterReady(cluster, capi.ReadyCondition) && readyTransitionTime.After(lastKnownTransitionTime[fmt.Sprintf("%s/%s", cluster.Namespace, cluster.Name)])
 	if sendUpgradeEvent {
