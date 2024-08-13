@@ -14,10 +14,12 @@ func isClusterUpgrading(object capiconditions.Getter, condition capi.ConditionTy
 	return capiconditions.IsFalse(object, condition) && capiconditions.GetReason(object, condition) == "RollingUpdateInProgress"
 }
 
-func conditionTimeStamp(object capiconditions.Getter, condition capi.ConditionType) (*v1.Time, bool) {
-	time := capiconditions.GetLastTransitionTime(object, condition)
-	if time != nil {
-		return time, true
+func conditionTimeStampFromReadyState(object capiconditions.Getter, condition capi.ConditionType) (*v1.Time, bool) {
+	if isClusterReady(object, condition) {
+		time := capiconditions.GetLastTransitionTime(object, condition)
+		if time != nil {
+			return time, true
+		}
 	}
 	return nil, false
 }

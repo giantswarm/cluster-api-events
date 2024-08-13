@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/giantswarm/microerror"
@@ -40,11 +39,6 @@ type ClusterReconciler struct {
 	Recorder record.EventRecorder
 }
 
-var (
-	lastKnownTransitionTime = make(map[string]time.Time)
-	mutex                   sync.Mutex
-)
-
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters/finalizers,verbs=update
@@ -52,7 +46,7 @@ var (
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
+// TODO: Modify the Reconcile function to compare the state specified by
 // the Cluster object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
@@ -76,11 +70,13 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	readyTransition, ok := conditionTimeStamp(cluster, capi.ReadyCondition)
-	if !ok {
-		return ctrl.Result{}, nil
+	// Load last known transition time from annotations
+	var lastKnownTransitionTime time.Time
+	if annotation, ok := cluster.Annotations["giantswarm.io/last-known-cluster-upgrade=time"]; ok {
+		if t, err := time.Parse(time.RFC3339, annotation); err == nil {
+			lastKnownTransitionTime = t
+		}
 	}
-	readyTransitionTime := readyTransition.Time.UTC()
 
 	// get all events for the cluster to check if the "Upgrading" event is present within the last 30 minutes
 	// estimated time for the upgrade to finish
@@ -100,28 +96,49 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// if cluster is upgrading and no event was sent in the last 20 minutes => send "Upgrading" event
+	// if cluster is upgrading and no event was sent in the last 30 minutes => send "Upgrading" event
 	sendUpgradingEvent := isClusterUpgrading(cluster, capi.ReadyCondition) && !upgradingEventIsPresent
 	if sendUpgradingEvent {
 		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("Cluster %s is Upgrading", cluster.Name))
 	}
 
 	// check last known "Ready" transition time for the cluster
-	clusterKey := fmt.Sprintf("%s/%s", cluster.Namespace, cluster.Name)
-	isFirstTime := !isLastKnownTransitionTimePresent(cluster)
+	isFirstTime := lastKnownTransitionTime.IsZero()
+
+	readyTransition, ok := conditionTimeStampFromReadyState(cluster, capi.ReadyCondition)
+	if !ok {
+		return ctrl.Result{}, nil
+	}
+	readyTransitionTime := readyTransition.Time.UTC()
 
 	if isFirstTime {
-        // Update the last known transition time for the first time
-        updateLastKnownTransitionTime(cluster, readyTransitionTime)
-    } else {
-	// if cluster is "Ready" (marked as true) and lastTransitionTime of type "Ready" is newer than our stored lastKnownTransition time => send "Upgrade" event
-	sendUpgradeEvent := isClusterReady(cluster, capi.ReadyCondition) && readyTransitionTime.After(lastKnownTransitionTime[fmt.Sprintf("%s/%s", cluster.Namespace, cluster.Name)])
-	if sendUpgradeEvent {
-		r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("Cluster %s is Upgraded", cluster.Name))
-		updateLastKnownTransitionTime(cluster, readyTransitionTime)
+		err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime)
+		if err != nil {
+			return ctrl.Result{}, microerror.Mask(err)
+		}
+	} else {
+		sendUpgradeEvent := isClusterReady(cluster, capi.ReadyCondition) && readyTransitionTime.After(lastKnownTransitionTime)
+		if sendUpgradeEvent {
+			r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("Cluster %s is Upgraded", cluster.Name))
+			err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime)
+			if err != nil {
+				return ctrl.Result{}, microerror.Mask(err)
+			}
+		}
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, transitionTime time.Time) error {
+	// Update the annotation on the cluster object
+	if cluster.Annotations == nil {
+		cluster.Annotations = make(map[string]string)
+	}
+	cluster.Annotations["giantswarm.io/last-known-cluster-upgrade=time"] = transitionTime.Format(time.RFC3339)
+
+	// Update the cluster object in Kubernetes
+	return client.Update(context.Background(), cluster)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -130,20 +147,4 @@ func (r *ClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Uncomment the following line adding a pointer to an instance of the controlled resource as an argument
 		For(&capi.Cluster{}).
 		Complete(r)
-}
-
-func isLastKnownTransitionTimePresent(cluster *capi.Cluster) bool {
-	key := fmt.Sprintf("%s/%s", cluster.Namespace, cluster.Name)
-	mutex.Lock()
-	defer mutex.Unlock()
-	last, exists := lastKnownTransitionTime[key]
-	log.Log.Info("Last known transition time", "time", last)
-	return exists
-}
-
-func updateLastKnownTransitionTime(cluster *capi.Cluster, readyTransitionTime time.Time) {
-	key := fmt.Sprintf("%s/%s", cluster.Namespace, cluster.Name)
-	mutex.Lock()
-	defer mutex.Unlock()
-	lastKnownTransitionTime[key] = readyTransitionTime
 }
