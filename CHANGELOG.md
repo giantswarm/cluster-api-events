@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Added `events.k8s.io` as apiGroup in RBAC.
+
 ## [0.1.2] - 2024-08-13
 
 ## [0.1.1] - 2024-08-13
