@@ -72,7 +72,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Load last known transition time from annotations
 	var lastKnownTransitionTime time.Time
-	if annotation, ok := cluster.Annotations["giantswarm.io/last-known-cluster-upgrade=time"]; ok {
+	if annotation, ok := cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-timestamp"]; ok {
 		if t, err := time.Parse(time.RFC3339, annotation); err == nil {
 			lastKnownTransitionTime = t
 		}
@@ -135,7 +135,7 @@ func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, 
 	if cluster.Annotations == nil {
 		cluster.Annotations = make(map[string]string)
 	}
-	cluster.Annotations["giantswarm.io/last-known-cluster-upgrade=time"] = transitionTime.Format(time.RFC3339)
+	cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-timestamp"] = transitionTime.Format(time.RFC3339)
 
 	// Update the cluster object in Kubernetes
 	return client.Update(context.Background(), cluster)
