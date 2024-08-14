@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Events RBAC.
+
 ## [0.1.5] - 2024-08-13
 
 ### Fixed
 
 - Transition timestamp.
-
 
 ## [0.1.4] - 2024-08-13
 

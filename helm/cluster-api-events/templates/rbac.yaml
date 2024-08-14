@@ -32,6 +32,8 @@ rules:
   verbs:
     - create
     - list
+    - update
+    - patch
     - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
