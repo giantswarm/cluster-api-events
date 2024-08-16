@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2024-08-16
+
 ### Added
 
 - Set new annotations `giantswarm.io/last-known-cluster-upgrade-timestamp` and `giantswarm.io/last-known-cluster-upgrade-version` on Cluster CR
@@ -41,7 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.1.6...v0.2.0
 [0.1.6]: https://github.com/giantswarm/cluster-api-events/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/giantswarm/cluster-api-events/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/giantswarm/cluster-api-events/compare/v0.1.3...v0.1.4
