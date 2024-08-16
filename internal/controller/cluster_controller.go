@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/giantswarm/microerror"
-	events "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -70,7 +69,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Load last known transition time from annotations
+	// load last known transition time from annotations
 	var lastKnownTransitionTime time.Time
 	if annotation, ok := cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-timestamp"]; ok {
 		if t, err := time.Parse(time.RFC3339, annotation); err == nil {
@@ -78,48 +77,43 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// get all events for the cluster to check if the "Upgrading" event is present within the last 30 minutes
-	// estimated time for the upgrade to finish
-	thirtyMinutesAgo := time.Now().Add(-30 * time.Minute).UTC()
-	upgradingEventIsPresent := false
-
-	eventList := &events.EventList{}
-	err = r.Client.List(ctx, eventList, client.InNamespace(req.Namespace))
-	if err != nil {
-		return ctrl.Result{}, microerror.Mask(err)
-	}
-
-	for _, event := range eventList.Items {
-		eventTime := event.CreationTimestamp.Time
-		if eventTime.After(thirtyMinutesAgo) && event.Reason == "Upgrading" && event.Regarding.Name == cluster.Name {
-			upgradingEventIsPresent = true
+	// load last known upgrade release version from annotations otherwise update it
+	if _, ok := cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"]; ok {
+		// last known upgrade version is set
+	} else {
+		err := updateLastKnownReleaseVersion(r.Client, cluster)
+		if err != nil {
+			return ctrl.Result{}, microerror.Mask(err)
 		}
 	}
 
-	// if cluster is upgrading and no event was sent in the last 30 minutes => send "Upgrading" event
-	sendUpgradingEvent := isClusterUpgrading(cluster, capi.ReadyCondition) && !upgradingEventIsPresent
+	// cluster is upgrading and release version is different => send "Upgrading" event
+	sendUpgradingEvent := isClusterUpgrading(cluster, capi.ReadyCondition) && isClusterReleaseVersionDifferent(cluster)
 	if sendUpgradingEvent {
-		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("Cluster %s is Upgrading", cluster.Name))
+		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("Cluster %s is Upgrading from release version %s to %s", cluster.Name, cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"], cluster.Labels["release.giantswarm.io/version"]))
+		err := updateLastKnownReleaseVersion(r.Client, cluster)
+		if err != nil {
+			return ctrl.Result{}, microerror.Mask(err)
+		}
 	}
 
-	// check last known "Ready" transition time for the cluster
-	isFirstTime := lastKnownTransitionTime.IsZero()
-
+	// wait for cluster is ready the first time
 	readyTransition, ok := conditionTimeStampFromReadyState(cluster, capi.ReadyCondition)
 	if !ok {
 		return ctrl.Result{}, nil
 	}
 	readyTransitionTime := readyTransition.Time.UTC()
 
-	if isFirstTime {
+	// ensure last known transition time is set when annotation is missing and cluster is ready when created
+	if lastKnownTransitionTime.IsZero() {
 		err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime)
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
 	} else {
-		sendUpgradeEvent := isClusterReady(cluster, capi.ReadyCondition) && readyTransitionTime.After(lastKnownTransitionTime)
+		sendUpgradeEvent := isClusterReady(cluster, capi.ReadyCondition) && readyTransitionTime.After(lastKnownTransitionTime) && !isClusterReleaseVersionDifferent(cluster)
 		if sendUpgradeEvent {
-			r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("Cluster %s is Upgraded", cluster.Name))
+			r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("Cluster %s is Upgraded to release %s", cluster.Name, cluster.Labels["release.giantswarm.io/version"]))
 			err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime)
 			if err != nil {
 				return ctrl.Result{}, microerror.Mask(err)
@@ -136,6 +130,17 @@ func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, 
 		cluster.Annotations = make(map[string]string)
 	}
 	cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-timestamp"] = transitionTime.Format(time.RFC3339)
+
+	// Update the cluster object in Kubernetes
+	return client.Update(context.Background(), cluster)
+}
+
+func updateLastKnownReleaseVersion(client client.Client, cluster *capi.Cluster) error {
+	// Update the annotation on the cluster object
+	if cluster.Annotations == nil {
+		cluster.Annotations = make(map[string]string)
+	}
+	cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"] = cluster.Labels["release.giantswarm.io/version"]
 
 	// Update the cluster object in Kubernetes
 	return client.Update(context.Background(), cluster)

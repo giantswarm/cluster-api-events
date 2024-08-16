@@ -23,3 +23,7 @@ func conditionTimeStampFromReadyState(object capiconditions.Getter, condition ca
 	}
 	return nil, false
 }
+
+func isClusterReleaseVersionDifferent(cluster *capi.Cluster) bool {
+	return cluster.Labels["release.giantswarm.io/version"] != cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"]
+}
