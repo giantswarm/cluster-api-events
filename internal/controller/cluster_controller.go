@@ -70,8 +70,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	if _, ok := cluster.Labels["release.giantswarm.io/version"]; ok {
+	if _, ok := cluster.Labels["release.giantswarm.io/version"]; !ok {
 		// ignore cluster which have no release version yet
+		log.Info("Cluster has no release version yet")
 		return ctrl.Result{}, nil
 	}
 
@@ -88,6 +89,15 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// last known upgrade version is set
 	} else {
 		err := updateLastKnownReleaseVersion(r.Client, cluster, false)
+		if err != nil {
+			return ctrl.Result{}, microerror.Mask(err)
+		}
+	}
+
+	if _, ok := cluster.Annotations["giantswarm.io/cluster-upgrading"]; ok {
+		// annotation is set
+	} else {
+		err := updateClusterUpgrading(r.Client, cluster, false)
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
@@ -148,6 +158,17 @@ func updateLastKnownReleaseVersion(client client.Client, cluster *capi.Cluster, 
 		cluster.Annotations = make(map[string]string)
 	}
 	cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"] = cluster.Labels["release.giantswarm.io/version"]
+	cluster.Annotations["giantswarm.io/cluster-upgrading"] = strconv.FormatBool(isUpgrading)
+
+	// Update the cluster object in Kubernetes
+	return client.Update(context.Background(), cluster)
+}
+
+func updateClusterUpgrading(client client.Client, cluster *capi.Cluster, isUpgrading bool) error {
+	// Update the annotation on the cluster object
+	if cluster.Annotations == nil {
+		cluster.Annotations = make(map[string]string)
+	}
 	cluster.Annotations["giantswarm.io/cluster-upgrading"] = strconv.FormatBool(isUpgrading)
 
 	// Update the cluster object in Kubernetes
