@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added 
+
+- Set new annotations `giantswarm.io/cluster-upgrading` on Cluster CR
+
 ### Fixed
 
 - Ignore updating ready condition timestamps like `ClusterReconcilerNormalFailed` which would send Upgrade events.
