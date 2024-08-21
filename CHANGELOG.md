@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Ignore updating ready condition timestamps like `ClusterReconcilerNormalFailed` which would send Upgrade events.
+
 ## [0.2.0] - 2024-08-16
 
 ### Added

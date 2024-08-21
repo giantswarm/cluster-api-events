@@ -87,6 +87,11 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
+	// dealing with weirdness in the cluster-api conditions
+	// ClusterReconcilerNormalFailed   failed to reconcile cluster services: failed to reconcile AzureCluster service privateendpoints
+	// those events lead to cluster ready condition being updated with a new timestamp but status ready is still true which will always trigger the upgrade event
+	var counter int
+
 	// cluster is upgrading and release version is different => send "Upgrading" event
 	sendUpgradingEvent := isClusterUpgrading(cluster, capi.ReadyCondition) && isClusterReleaseVersionDifferent(cluster)
 	if sendUpgradingEvent {
@@ -95,6 +100,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
+		counter++
 	}
 
 	// wait for cluster is ready the first time
@@ -111,13 +117,15 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, microerror.Mask(err)
 		}
 	} else {
-		sendUpgradeEvent := isClusterReady(cluster, capi.ReadyCondition) && readyTransitionTime.After(lastKnownTransitionTime) && !isClusterReleaseVersionDifferent(cluster)
+		sendUpgradeEvent := isClusterReady(cluster, capi.ReadyCondition) && counter > 0 && readyTransitionTime.After(lastKnownTransitionTime) && !isClusterReleaseVersionDifferent(cluster)
 		if sendUpgradeEvent {
 			r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("Cluster %s is Upgraded to release %s", cluster.Name, cluster.Labels["release.giantswarm.io/version"]))
 			err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime)
 			if err != nil {
 				return ctrl.Result{}, microerror.Mask(err)
 			}
+			// reset counter waiting for next upgrading event
+			counter = 0
 		}
 	}
 
