@@ -1,7 +1,7 @@
 version: 2.1
 
 orbs:
-  architect: giantswarm/architect@5.4.0
+  architect: giantswarm/architect@5.11.4
 
 workflows:
   package-and-push-chart-on-tag:
@@ -25,13 +25,12 @@ workflows:
             tags:
               only: /^v.*/
             branches:
-              ignore:
-                - main
-                - master
+              only: /.*/
 
       - architect/push-to-app-catalog:
           context: architect
           name: push-to-app-catalog
+          executor: app-build-suite
           app_catalog: control-plane-catalog
           app_catalog_test: control-plane-test-catalog
           chart: cluster-api-events
@@ -41,9 +40,7 @@ workflows:
             tags:
               only: /^v.*/
             branches:
-              ignore:
-                - main
-                - master
+              only: /.*/ 
 
       - architect/push-to-app-collection:
           context: architect

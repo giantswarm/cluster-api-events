@@ -1,12 +1,15 @@
 apiVersion: v2
-
 name: cluster-api-events
-appVersion: "[[ .AppVersion ]]"
-version: "[[ .Version ]]"
-
 description: Operator for sending cluster events.
-
+version: 0.0.1-dev
+appVersion: 0.0.1-dev
 home: https://github.com/giantswarm/cluster-api-events
+icon: https://s.giantswarm.io/app-icons/giantswarm/1/dark.svg
 annotations:
   application.giantswarm.io/team: turtles
   config.giantswarm.io/version: 1.x.x
+  ui.giantswarm.io/logo: https://s.giantswarm.io/app-icons/giantswarm/1/dark.svg
+restrictions:
+  clusterSingleton: true
+  fixedNamespace: kube-system
+  gpuInstances: false
