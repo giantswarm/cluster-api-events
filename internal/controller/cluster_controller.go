@@ -57,7 +57,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	log := log.FromContext(ctx)
 	cluster := &capi.Cluster{}
 
-	err := r.Client.Get(ctx, req.NamespacedName, cluster)
+	err := r.Get(ctx, req.NamespacedName, cluster)
 	if apierrors.IsNotFound(err) {
 		log.Info("Cluster no longer exists")
 		return ctrl.Result{}, nil
@@ -118,7 +118,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if !ok {
 		return ctrl.Result{}, nil
 	}
-	readyTransitionTime := readyTransition.Time.UTC()
+	readyTransitionTime := readyTransition.UTC()
 
 	// ensure last known transition time is set when annotation is missing and cluster is ready when created
 	if lastKnownTransitionTime.IsZero() {

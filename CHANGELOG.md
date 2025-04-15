@@ -9,13 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed 
 
-- Disable logger development mode to avoid panicking, use zap as logger
+- Disable logger development mode to avoid panicking, use zap as logger.
+
+### Fixed
+
+- Fix linting issues.
 
 ## [0.3.0] - 2024-08-21
 
 ### Added 
 
-- Set new annotations `giantswarm.io/cluster-upgrading` on Cluster CR
+- Set new annotations `giantswarm.io/cluster-upgrading` on Cluster CR.
 
 ### Fixed
 
@@ -25,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Set new annotations `giantswarm.io/last-known-cluster-upgrade-timestamp` and `giantswarm.io/last-known-cluster-upgrade-version` on Cluster CR
+- Set new annotations `giantswarm.io/last-known-cluster-upgrade-timestamp` and `giantswarm.io/last-known-cluster-upgrade-version` on Cluster CR.
 
 ## [0.1.6] - 2024-08-14
 
