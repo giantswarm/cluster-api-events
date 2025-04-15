@@ -1,4 +1,5 @@
 version: 2.1
+
 orbs:
   architect: giantswarm/architect@5.4.0
 
@@ -23,24 +24,32 @@ workflows:
             # Trigger the job also on git tag.
             tags:
               only: /^v.*/
+            branches:
+              ignore:
+                - main
+                - master
 
       - architect/push-to-app-catalog:
-          context: "architect"
+          context: architect
           name: push-to-app-catalog
-          app_catalog: "control-plane-catalog"
-          app_catalog_test: "control-plane-test-catalog"
-          chart: "cluster-api-events"
+          app_catalog: control-plane-catalog
+          app_catalog_test: control-plane-test-catalog
+          chart: cluster-api-events
           requires:
             - go-build
           filters:
             tags:
               only: /^v.*/
+            branches:
+              ignore:
+                - main
+                - master
 
       - architect/push-to-app-collection:
           context: architect
           name: push-to-capa-app-collection
-          app_name: "cluster-api-events"
-          app_collection_repo: "capa-app-collection"
+          app_name: cluster-api-events
+          app_collection_repo: capa-app-collection
           requires:
             - push-to-app-catalog
           filters:
@@ -52,8 +61,8 @@ workflows:
       - architect/push-to-app-collection:
           context: architect
           name: push-to-capz-app-collection
-          app_name: "cluster-api-events"
-          app_collection_repo: "capz-app-collection"
+          app_name: cluster-api-events
+          app_collection_repo: capz-app-collection
           requires:
             - push-to-app-catalog
           filters:
