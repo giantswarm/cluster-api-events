@@ -11,43 +11,98 @@ jobs:
   validate-changelog:
     name: Validate Changelog Content
     runs-on: ubuntu-24.04
-    # Only run this check on release PRs (branches that contain version patterns)
+    # Only run this check on release PRs matching your specific patterns
     if: |
-      contains(github.head_ref, 'release') || 
-      contains(github.head_ref, 'v') ||
-      contains(github.head_ref, '#major') ||
-      contains(github.head_ref, '#minor') || 
-      contains(github.head_ref, '#patch')
+      contains(github.head_ref, '#release#v') || 
+      contains(github.head_ref, '#release#major') ||
+      contains(github.head_ref, '#release#minor') || 
+      contains(github.head_ref, '#release#patch')
+
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-          
+
       - name: Extract version from branch name
         id: extract_version
         run: |
           branch_name="${{ github.head_ref }}"
           echo "Branch name: $branch_name"
           
-          # Try to extract version from different branch patterns
-          if [[ $branch_name =~ release.*v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+          version=""
+          
+          # Handle patterns like: main#release#v1.2.3, master#release#v1.2.3, etc.
+          if [[ "$branch_name" =~ #release#v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             version="${BASH_REMATCH[1]}"
-          elif [[ $branch_name =~ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-            version="${BASH_REMATCH[1]}"
-          elif [[ $branch_name =~ #(major|minor|patch)$ ]]; then
-            # For semantic version branches, we need to determine the version from the changelog
-            # Look for the most recent version entry that was just added
+            echo "✅ Matched explicit version pattern: $version"
+            
+          # Handle patterns like: main#release#major, main#release#minor, main#release#patch
+          elif [[ "$branch_name" =~ #release#(major|minor|patch)$ ]]; then
+            bump_type="${BASH_REMATCH[1]}"
+            echo "🔍 Detected semantic version branch ($bump_type), extracting version from changelog..."
+            
+            if [ ! -f "CHANGELOG.md" ]; then
+              echo "::error::CHANGELOG.md not found"
+              exit 1
+            fi
+            
+            # Get the first version entry (should be the newest one that architect created)
             version=$(grep -E "^## \[[0-9]+\.[0-9]+\.[0-9]+\]" CHANGELOG.md | head -1 | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/')
+            
+            if [ -z "$version" ]; then
+              echo "::error::Could not find version in CHANGELOG.md"
+              echo "::error::Expected to find a line like: ## [X.Y.Z] - YYYY-MM-DD"
+              echo "Available changelog entries:"
+              grep -E "^## \[" CHANGELOG.md | head -5 || echo "No version entries found"
+              exit 1
+            fi
+            
+            echo "✅ Extracted version from changelog for $bump_type release: $version"
+            
+          # Handle legacy patterns like: release#v1.2.3, release#major, etc.
+          elif [[ "$branch_name" =~ ^release#v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            echo "✅ Matched legacy explicit version pattern: $version"
+            
+          elif [[ "$branch_name" =~ ^release#(major|minor|patch)$ ]]; then
+            bump_type="${BASH_REMATCH[1]}"
+            echo "🔍 Detected legacy semantic version branch ($bump_type), extracting version from changelog..."
+            
+            if [ ! -f "CHANGELOG.md" ]; then
+              echo "::error::CHANGELOG.md not found"
+              exit 1
+            fi
+            
+            version=$(grep -E "^## \[[0-9]+\.[0-9]+\.[0-9]+\]" CHANGELOG.md | head -1 | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/')
+            
+            if [ -z "$version" ]; then
+              echo "::error::Could not find version in CHANGELOG.md for legacy release branch"
+              exit 1
+            fi
+            
+            echo "✅ Extracted version from changelog for legacy $bump_type release: $version"
+            
           else
-            echo "Could not extract version from branch name: $branch_name"
-            echo "Supported patterns: release/vX.Y.Z, vX.Y.Z, branch#major, branch#minor, branch#patch"
+            echo "::error::Could not extract version from branch name: $branch_name"
+            echo "::error::Expected patterns:"
+            echo "  - main#release#v1.2.3"
+            echo "  - main#release#major|minor|patch"
+            echo "  - master#release#v1.2.3"  
+            echo "  - master#release#major|minor|patch"
+            echo "  - release#v1.2.3"
+            echo "  - release#major|minor|patch"
             exit 1
           fi
           
-          echo "Extracted version: $version"
-          echo "version=$version" >> $GITHUB_OUTPUT
+          if [ -z "$version" ]; then
+            echo "::error::Version extraction failed - version is empty"
+            exit 1
+          fi
           
+          echo "Final extracted version: $version"
+          echo "version=$version" >> $GITHUB_OUTPUT
+
       - name: Validate changelog content
         run: |
           version="${{ steps.extract_version.outputs.version }}"
