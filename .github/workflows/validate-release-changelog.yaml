@@ -1,0 +1,138 @@
+name: Validate Release Changelog
+
+on:
+  workflow_call:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'CHANGELOG.md'
+
+jobs:
+  validate-changelog:
+    name: Validate Changelog Content
+    runs-on: ubuntu-24.04
+    # Only run this check on release PRs (branches that contain version patterns)
+    if: |
+      contains(github.head_ref, 'release') || 
+      contains(github.head_ref, 'v') ||
+      contains(github.head_ref, '#major') ||
+      contains(github.head_ref, '#minor') || 
+      contains(github.head_ref, '#patch')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          
+      - name: Extract version from branch name
+        id: extract_version
+        run: |
+          branch_name="${{ github.head_ref }}"
+          echo "Branch name: $branch_name"
+          
+          # Try to extract version from different branch patterns
+          if [[ $branch_name =~ release.*v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            version="${BASH_REMATCH[1]}"
+          elif [[ $branch_name =~ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            version="${BASH_REMATCH[1]}"
+          elif [[ $branch_name =~ #(major|minor|patch)$ ]]; then
+            # For semantic version branches, we need to determine the version from the changelog
+            # Look for the most recent version entry that was just added
+            version=$(grep -E "^## \[[0-9]+\.[0-9]+\.[0-9]+\]" CHANGELOG.md | head -1 | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/')
+          else
+            echo "Could not extract version from branch name: $branch_name"
+            echo "Supported patterns: release/vX.Y.Z, vX.Y.Z, branch#major, branch#minor, branch#patch"
+            exit 1
+          fi
+          
+          echo "Extracted version: $version"
+          echo "version=$version" >> $GITHUB_OUTPUT
+          
+      - name: Validate changelog content
+        run: |
+          version="${{ steps.extract_version.outputs.version }}"
+          changelog_file="CHANGELOG.md"
+          
+          echo "🔍 Validating changelog content for version $version..."
+          echo "📄 Checking file: $changelog_file"
+          
+          # Check if CHANGELOG.md exists
+          if [ ! -f "$changelog_file" ]; then
+            echo "::error::No $changelog_file found in repository"
+            exit 1
+          fi
+          
+          # Extract the content between the new version and the next version
+          changelog_section=$(awk "
+              /^## \[$version\]/ { found=1; print; next }
+              found && /^## \[/ && !/^## \[$version\]/ { found=0 }
+              found { print }
+          " "$changelog_file")
+          
+          if [ -z "$changelog_section" ]; then
+            echo "::error::No section found for version $version in changelog"
+            echo "::error::Expected format: ## [$version] - YYYY-MM-DD"
+            exit 1
+          fi
+          
+          echo "📋 Found changelog section for version $version"
+          
+          # Check if there are any ### headers (Added, Changed, Deprecated, Removed, Fixed, Security)
+          subsection_count=$(echo "$changelog_section" | grep -c "^### " || true)
+          
+          if [ "$subsection_count" -eq 0 ]; then
+            echo "::error title=Empty Changelog::No changelog content found for version $version"
+            echo "::error::The release appears to have an empty changelog."
+            echo ""
+            echo "Please add content under appropriate sections like:"
+            echo "  ### Added     - for new features"
+            echo "  ### Changed   - for changes in existing functionality" 
+            echo "  ### Fixed     - for any bug fixes"
+            echo "  ### Removed   - for now removed features"
+            echo "  ### Deprecated - for soon-to-be removed features"
+            echo "  ### Security  - in case of vulnerabilities"
+            echo ""
+            echo "Current changelog section:"
+            echo "$changelog_section"
+            exit 1
+          else
+            echo "Changelog validation passed: Found $subsection_count section(s)"
+            echo "Sections found:"
+            echo "$changelog_section" | grep "^### " | sed 's/^/  /'
+          fi
+          
+      - name: Add PR comment if validation fails
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4adc5c3cfcf1b9beebb1a80ae7 # v7.0.1
+        with:
+          script: |
+            const version = '${{ steps.extract_version.outputs.version }}';
+            const body = `## 📝 Changelog Validation Failed
+            
+            The changelog for version **${version}** appears to be empty.
+            
+            Please add content under appropriate sections like:
+            - \`### Added\` - for new features
+            - \`### Changed\` - for changes in existing functionality
+            - \`### Fixed\` - for any bug fixes
+            - \`### Removed\` - for now removed features
+            - \`### Deprecated\` - for soon-to-be removed features
+            - \`### Security\` - in case of vulnerabilities
+            
+            **Example:**
+            \`\`\`markdown
+            ## [${version}] - ${new Date().toISOString().split('T')[0]}
+            
+            ### Changed
+            - Updated dependency X to version Y
+            - Improved error handling in module Z
+            \`\`\`
+            
+            This check will pass once you add proper changelog content.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
