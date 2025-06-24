@@ -103,7 +103,7 @@ jobs:
           
       - name: Add PR comment if validation fails
         if: failure()
-        uses: actions/github-script@60a0d83039c74a4adc5c3cfcf1b9beebb1a80ae7 # v7.0.1
+        uses: actions/github-script@v7
         with:
           script: |
             const version = '${{ steps.extract_version.outputs.version }}';
@@ -136,3 +136,4 @@ jobs:
               repo: context.repo.repo,
               body: body
             });
+
