@@ -7,6 +7,10 @@ on:
     paths:
       - 'CHANGELOG.md'
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   validate-changelog:
     name: Validate Changelog Content
@@ -26,8 +30,10 @@ jobs:
 
       - name: Extract version from branch name
         id: extract_version
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
         run: |
-          branch_name="${{ github.head_ref }}"
+          branch_name="$BRANCH_NAME"
           echo "Branch name: $branch_name"
           
           version=""
