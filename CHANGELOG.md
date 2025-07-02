@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Support for both `MachineDeployments` and `MachinePools` worker node tracking.
+- Added logging for upgrade progress monitoring.
+
+### Fixed
+
+- Annotation update conflicts causing "object has been modified" errors.
+- Premature "Upgraded" events when only control plane was ready - now waits for all worker nodes.
+
 ## [0.4.0] - 2025-06-24
 
 ### Changed 

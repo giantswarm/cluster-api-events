@@ -25,11 +25,16 @@ import (
 	"github.com/giantswarm/microerror"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	capi "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // ClusterReconciler reconciles a Cluster object
@@ -42,6 +47,10 @@ type ClusterReconciler struct {
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinedeployments/status,verbs=get
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinepools,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machinepools/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -84,28 +93,98 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// load last known upgrade release version from annotations otherwise update it
-	if _, ok := cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"]; ok {
-		// last known upgrade version is set
-	} else {
-		err := updateLastKnownReleaseVersion(r.Client, cluster, false)
-		if err != nil {
-			return ctrl.Result{}, microerror.Mask(err)
-		}
+	// Check if we need to initialize any missing annotations and batch them into a single update
+	needsAnnotationUpdate := false
+	missingUpgradeVersion := false
+	missingUpgrading := false
+
+	if _, ok := cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"]; !ok {
+		needsAnnotationUpdate = true
+		missingUpgradeVersion = true
 	}
 
-	if _, ok := cluster.Annotations["giantswarm.io/cluster-upgrading"]; ok {
-		// annotation is set
-	} else {
-		err := updateClusterUpgrading(r.Client, cluster, false)
+	if _, ok := cluster.Annotations["giantswarm.io/cluster-upgrading"]; !ok {
+		needsAnnotationUpdate = true
+		missingUpgrading = true
+	}
+
+	// Batch update missing annotations in a single call to reduce conflicts
+	if needsAnnotationUpdate {
+		// Check if this is a newly created cluster (creation time within last 5 minutes)
+		isNewCluster := time.Since(cluster.CreationTimestamp.Time) < 5*time.Minute
+
+		if isNewCluster {
+			log.Info("Detected new cluster, initializing upgrade annotations",
+				"age", time.Since(cluster.CreationTimestamp.Time),
+				"missingAnnotations", []string{
+					func() string {
+						if missingUpgradeVersion {
+							return "upgrade-version"
+						} else {
+							return ""
+						}
+					}(),
+					func() string {
+						if missingUpgrading {
+							return "upgrading"
+						} else {
+							return ""
+						}
+					}(),
+				})
+
+			// For new clusters, add a small delay to let other controllers settle
+			// and use more aggressive retry settings
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+			if missingUpgradeVersion {
+				c.Annotations["giantswarm.io/last-known-cluster-upgrade-version"] = c.Labels["release.giantswarm.io/version"]
+			}
+			if missingUpgrading {
+				c.Annotations["giantswarm.io/cluster-upgrading"] = "false"
+			}
+		})
 		if err != nil {
+			if isNewCluster {
+				log.Info("Conflict during new cluster annotation setup, will retry on next reconciliation", "error", err)
+				// For new clusters, don't fail the reconciliation on conflicts - just retry later
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			return ctrl.Result{}, microerror.Mask(err)
+		}
+		// Refetch cluster after update to ensure we have the latest version
+		if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
 	}
 
 	// cluster is upgrading and release version is different => send "Upgrading" event
-	sendUpgradingEvent := isClusterUpgrading(cluster, capi.ReadyCondition) && isClusterReleaseVersionDifferent(cluster)
+	workerNodesUpgrading, err := areAnyWorkerNodesUpgrading(ctx, r.Client, cluster)
+	if err != nil {
+		log.Error(err, "Failed to check worker node upgrade status")
+		return ctrl.Result{}, microerror.Mask(err)
+	}
+
+	controlPlaneUpgrading := isClusterUpgrading(cluster, capi.ReadyCondition)
+	releaseVersionDifferent := isClusterReleaseVersionDifferent(cluster)
+
+	if controlPlaneUpgrading || workerNodesUpgrading || releaseVersionDifferent {
+		log.Info("Cluster upgrade status check",
+			"controlPlaneUpgrading", controlPlaneUpgrading,
+			"workerNodesUpgrading", workerNodesUpgrading,
+			"releaseVersionDifferent", releaseVersionDifferent,
+			"currentVersion", cluster.Labels["release.giantswarm.io/version"],
+			"lastKnownVersion", cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"],
+			"clusterUpgrading", cluster.Annotations["giantswarm.io/cluster-upgrading"])
+	}
+
+	sendUpgradingEvent := (controlPlaneUpgrading || workerNodesUpgrading) && releaseVersionDifferent
 	if sendUpgradingEvent {
+		log.Info("Cluster upgrade started",
+			"fromVersion", cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"],
+			"toVersion", cluster.Labels["release.giantswarm.io/version"])
 		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("Cluster %s is Upgrading from release version %s to %s", cluster.Name, cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"], cluster.Labels["release.giantswarm.io/version"]))
 		err := updateLastKnownReleaseVersion(r.Client, cluster, true)
 		if err != nil {
@@ -116,23 +195,72 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// wait for cluster is ready the first time
 	readyTransition, ok := conditionTimeStampFromReadyState(cluster, capi.ReadyCondition)
 	if !ok {
+		log.V(1).Info("Cluster control plane not ready yet, waiting...")
 		return ctrl.Result{}, nil
 	}
 	readyTransitionTime := readyTransition.UTC()
 
 	// ensure last known transition time is set when annotation is missing and cluster is ready when created
 	if lastKnownTransitionTime.IsZero() {
+		log.Info("Initializing cluster upgrade timestamp", "readyTime", readyTransitionTime)
 		err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
 	} else {
-		sendUpgradeEvent := isClusterReady(cluster, capi.ReadyCondition) && cluster.Annotations["giantswarm.io/cluster-upgrading"] == "true" && readyTransitionTime.After(lastKnownTransitionTime) && !isClusterReleaseVersionDifferent(cluster)
-		if sendUpgradeEvent {
-			r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("Cluster %s is Upgraded to release %s", cluster.Name, cluster.Labels["release.giantswarm.io/version"]))
-			err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
+		isCurrentlyUpgrading := cluster.Annotations["giantswarm.io/cluster-upgrading"] == "true"
+
+		// Only check worker nodes if we're actually upgrading
+		if isCurrentlyUpgrading {
+			allWorkerNodesReady, err := areAllWorkerNodesReady(ctx, r.Client, cluster)
 			if err != nil {
+				log.Error(err, "Failed to check worker node ready status")
 				return ctrl.Result{}, microerror.Mask(err)
+			}
+
+			controlPlaneReady := isClusterReady(cluster, capi.ReadyCondition)
+			timeProgressed := readyTransitionTime.After(lastKnownTransitionTime)
+			versionsMatch := !isClusterReleaseVersionDifferent(cluster)
+
+			log.Info("Upgrade in progress - checking completion criteria",
+				"controlPlaneReady", controlPlaneReady,
+				"allWorkerNodesReady", allWorkerNodesReady,
+				"timeProgressed", timeProgressed,
+				"versionsMatch", versionsMatch,
+				"lastTransitionTime", lastKnownTransitionTime,
+				"currentReadyTime", readyTransitionTime)
+
+			// Only send upgrade complete event when both control plane AND worker nodes are ready
+			sendUpgradeEvent := controlPlaneReady &&
+				allWorkerNodesReady &&
+				timeProgressed &&
+				versionsMatch
+
+			if sendUpgradeEvent {
+				log.Info("Cluster upgrade completed successfully",
+					"version", cluster.Labels["release.giantswarm.io/version"],
+					"duration", readyTransitionTime.Sub(lastKnownTransitionTime))
+				r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("Cluster %s is Upgraded to release %s", cluster.Name, cluster.Labels["release.giantswarm.io/version"]))
+				err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
+				if err != nil {
+					return ctrl.Result{}, microerror.Mask(err)
+				}
+			} else {
+				// Log why upgrade is not yet complete
+				reasons := []string{}
+				if !controlPlaneReady {
+					reasons = append(reasons, "control plane not ready")
+				}
+				if !allWorkerNodesReady {
+					reasons = append(reasons, "worker nodes not ready")
+				}
+				if !timeProgressed {
+					reasons = append(reasons, "time not progressed")
+				}
+				if !versionsMatch {
+					reasons = append(reasons, "versions don't match")
+				}
+				log.Info("Upgrade still in progress", "waitingFor", reasons)
 			}
 		}
 	}
@@ -140,45 +268,83 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, nil
 }
 
-func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, transitionTime time.Time, isUpgrading bool) error {
-	// Update the annotation on the cluster object
-	if cluster.Annotations == nil {
-		cluster.Annotations = make(map[string]string)
-	}
-	cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-timestamp"] = transitionTime.Format(time.RFC3339)
-	cluster.Annotations["giantswarm.io/cluster-upgrading"] = strconv.FormatBool(isUpgrading)
+func updateClusterAnnotations(client client.Client, cluster *capi.Cluster, modifyFunc func(*capi.Cluster)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestCluster := &capi.Cluster{}
+		if err := client.Get(context.Background(), types.NamespacedName{
+			Name:      cluster.Name,
+			Namespace: cluster.Namespace,
+		}, latestCluster); err != nil {
+			return err
+		}
 
-	// Update the cluster object in Kubernetes
-	return client.Update(context.Background(), cluster)
+		if latestCluster.Annotations == nil {
+			latestCluster.Annotations = make(map[string]string)
+		}
+
+		modifyFunc(latestCluster)
+
+		if err := client.Update(context.Background(), latestCluster); err != nil {
+			if !apierrors.IsConflict(err) {
+				return err
+			}
+			return err
+		}
+		return nil
+	})
+}
+
+func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, transitionTime time.Time, isUpgrading bool) error {
+	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
+		c.Annotations["giantswarm.io/last-known-cluster-upgrade-timestamp"] = transitionTime.Format(time.RFC3339)
+		c.Annotations["giantswarm.io/cluster-upgrading"] = strconv.FormatBool(isUpgrading)
+	})
 }
 
 func updateLastKnownReleaseVersion(client client.Client, cluster *capi.Cluster, isUpgrading bool) error {
-	// Update the annotation on the cluster object
-	if cluster.Annotations == nil {
-		cluster.Annotations = make(map[string]string)
-	}
-	cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"] = cluster.Labels["release.giantswarm.io/version"]
-	cluster.Annotations["giantswarm.io/cluster-upgrading"] = strconv.FormatBool(isUpgrading)
-
-	// Update the cluster object in Kubernetes
-	return client.Update(context.Background(), cluster)
-}
-
-func updateClusterUpgrading(client client.Client, cluster *capi.Cluster, isUpgrading bool) error {
-	// Update the annotation on the cluster object
-	if cluster.Annotations == nil {
-		cluster.Annotations = make(map[string]string)
-	}
-	cluster.Annotations["giantswarm.io/cluster-upgrading"] = strconv.FormatBool(isUpgrading)
-
-	// Update the cluster object in Kubernetes
-	return client.Update(context.Background(), cluster)
+	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
+		c.Annotations["giantswarm.io/last-known-cluster-upgrade-version"] = c.Labels["release.giantswarm.io/version"]
+		c.Annotations["giantswarm.io/cluster-upgrading"] = strconv.FormatBool(isUpgrading)
+	})
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		// Uncomment the following line adding a pointer to an instance of the controlled resource as an argument
 		For(&capi.Cluster{}).
+		Watches(
+			&capi.MachineDeployment{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				md := obj.(*capi.MachineDeployment)
+				if clusterName, ok := md.Labels[capi.ClusterNameLabel]; ok {
+					return []reconcile.Request{
+						{
+							NamespacedName: types.NamespacedName{
+								Name:      clusterName,
+								Namespace: md.Namespace,
+							},
+						},
+					}
+				}
+				return []reconcile.Request{}
+			}),
+		).
+		Watches(
+			&capiexp.MachinePool{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				mp := obj.(*capiexp.MachinePool)
+				if clusterName, ok := mp.Labels[capi.ClusterNameLabel]; ok {
+					return []reconcile.Request{
+						{
+							NamespacedName: types.NamespacedName{
+								Name:      clusterName,
+								Namespace: mp.Namespace,
+							},
+						},
+					}
+				}
+				return []reconcile.Request{}
+			}),
+		).
 		Complete(r)
 }
