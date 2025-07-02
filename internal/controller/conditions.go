@@ -31,7 +31,7 @@ func conditionTimeStampFromReadyState(object capiconditions.Getter, condition ca
 }
 
 func isClusterReleaseVersionDifferent(cluster *capi.Cluster) bool {
-	return cluster.Labels["release.giantswarm.io/version"] != cluster.Annotations["giantswarm.io/last-known-cluster-upgrade-version"]
+	return cluster.Labels[ReleaseVersionLabel] != cluster.Annotations[LastKnownUpgradeVersionAnnotation]
 }
 
 // areAllWorkerNodesReady checks if all MachineDeployments and MachinePools are ready
@@ -47,15 +47,15 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	var versionMismatchMDs []string
 	for _, md := range machineDeployments.Items {
 		ready := isClusterReady(&md, capi.ReadyCondition)
-		versionMatch := md.Labels["release.giantswarm.io/version"] == cluster.Labels["release.giantswarm.io/version"]
+		versionMatch := md.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
 
 		log := log.FromContext(ctx)
 		log.V(1).Info("Checking MachineDeployment status",
 			"name", md.Name,
 			"ready", ready,
 			"versionMatch", versionMatch,
-			"mdVersion", md.Labels["release.giantswarm.io/version"],
-			"clusterVersion", cluster.Labels["release.giantswarm.io/version"],
+			"mdVersion", md.Labels[ReleaseVersionLabel],
+			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
 			"readyCondition", func() string {
 				if condition := capiconditions.Get(&md, capi.ReadyCondition); condition != nil {
 					return fmt.Sprintf("status=%s,reason=%s", condition.Status, condition.Reason)
@@ -70,8 +70,8 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		if !versionMatch {
 			versionMismatchMDs = append(versionMismatchMDs, fmt.Sprintf("%s(%s->%s)",
 				md.Name,
-				md.Labels["release.giantswarm.io/version"],
-				cluster.Labels["release.giantswarm.io/version"]))
+				md.Labels[ReleaseVersionLabel],
+				cluster.Labels[ReleaseVersionLabel]))
 		}
 	}
 
@@ -86,15 +86,15 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	var versionMismatchMPs []string
 	for _, mp := range machinePools.Items {
 		ready := isClusterReady(&mp, capi.ReadyCondition)
-		versionMatch := mp.Labels["release.giantswarm.io/version"] == cluster.Labels["release.giantswarm.io/version"]
+		versionMatch := mp.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
 
 		log := log.FromContext(ctx)
 		log.V(1).Info("Checking MachinePool status",
 			"name", mp.Name,
 			"ready", ready,
 			"versionMatch", versionMatch,
-			"mpVersion", mp.Labels["release.giantswarm.io/version"],
-			"clusterVersion", cluster.Labels["release.giantswarm.io/version"],
+			"mpVersion", mp.Labels[ReleaseVersionLabel],
+			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
 			"readyCondition", func() string {
 				if condition := capiconditions.Get(&mp, capi.ReadyCondition); condition != nil {
 					return fmt.Sprintf("status=%s,reason=%s", condition.Status, condition.Reason)
@@ -109,8 +109,8 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		if !versionMatch {
 			versionMismatchMPs = append(versionMismatchMPs, fmt.Sprintf("%s(%s->%s)",
 				mp.Name,
-				mp.Labels["release.giantswarm.io/version"],
-				cluster.Labels["release.giantswarm.io/version"]))
+				mp.Labels[ReleaseVersionLabel],
+				cluster.Labels[ReleaseVersionLabel]))
 		}
 	}
 
