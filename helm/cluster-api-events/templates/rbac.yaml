@@ -10,6 +10,10 @@ rules:
   resources:
     - clusters
     - clusters/status
+    - machinedeployments
+    - machinedeployments/status
+    - machinepools
+    - machinepools/status
   verbs:
     - get
     - list
