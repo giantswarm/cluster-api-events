@@ -49,11 +49,25 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		ready := isClusterReady(&md, capi.ReadyCondition)
 		versionMatch := md.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
 
+		var desiredReplicas int32
+		if md.Spec.Replicas != nil {
+			desiredReplicas = *md.Spec.Replicas
+		}
+
+		rolloutComplete := desiredReplicas == md.Status.UpdatedReplicas &&
+			desiredReplicas == md.Status.ReadyReplicas &&
+			desiredReplicas == md.Status.AvailableReplicas
+
 		log := log.FromContext(ctx)
 		log.V(1).Info("Checking MachineDeployment status",
 			"name", md.Name,
 			"ready", ready,
+			"rolloutComplete", rolloutComplete,
 			"versionMatch", versionMatch,
+			"desiredReplicas", desiredReplicas,
+			"updatedReplicas", md.Status.UpdatedReplicas,
+			"readyReplicas", md.Status.ReadyReplicas,
+			"availableReplicas", md.Status.AvailableReplicas,
 			"mdVersion", md.Labels[ReleaseVersionLabel],
 			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
 			"readyCondition", func() string {
@@ -63,7 +77,7 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 				return "missing"
 			}())
 
-		if !ready {
+		if !ready || !rolloutComplete {
 			notReadyMDs = append(notReadyMDs, md.Name)
 		}
 
@@ -88,11 +102,22 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		ready := isClusterReady(&mp, capi.ReadyCondition)
 		versionMatch := mp.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
 
+		var desiredReplicas int32
+		if mp.Spec.Replicas != nil {
+			desiredReplicas = *mp.Spec.Replicas
+		}
+		rolloutComplete := desiredReplicas == mp.Status.ReadyReplicas &&
+			desiredReplicas == mp.Status.AvailableReplicas
+
 		log := log.FromContext(ctx)
 		log.V(1).Info("Checking MachinePool status",
 			"name", mp.Name,
 			"ready", ready,
+			"rolloutComplete", rolloutComplete,
 			"versionMatch", versionMatch,
+			"desiredReplicas", desiredReplicas,
+			"readyReplicas", mp.Status.ReadyReplicas,
+			"availableReplicas", mp.Status.AvailableReplicas,
 			"mpVersion", mp.Labels[ReleaseVersionLabel],
 			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
 			"readyCondition", func() string {
@@ -102,7 +127,7 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 				return "missing"
 			}())
 
-		if !ready {
+		if !ready || !rolloutComplete {
 			notReadyMPs = append(notReadyMPs, mp.Name)
 		}
 
