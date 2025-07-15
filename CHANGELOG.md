@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Ensured cluster upgrade completion is only reported when all worker nodes are fully updated and ready.
+
 ## [0.5.1] - 2025-07-08
 
 ### Fixed
