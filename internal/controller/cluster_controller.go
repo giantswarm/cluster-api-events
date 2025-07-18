@@ -196,7 +196,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		log.Info("Cluster upgrade started",
 			"fromVersion", cluster.Annotations[LastKnownUpgradeVersionAnnotation],
 			"toVersion", cluster.Labels[ReleaseVersionLabel])
-		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("Cluster %s is Upgrading from release version %s to %s", cluster.Name, cluster.Annotations[LastKnownUpgradeVersionAnnotation], cluster.Labels[ReleaseVersionLabel]))
+		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("from release %s to %s", cluster.Annotations[LastKnownUpgradeVersionAnnotation], cluster.Labels[ReleaseVersionLabel]))
 		err := updateLastKnownReleaseVersion(r.Client, cluster, true)
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
@@ -251,7 +251,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				log.Info("Cluster upgrade completed successfully",
 					"version", cluster.Labels[ReleaseVersionLabel],
 					"duration", readyTransitionTime.Sub(lastKnownTransitionTime))
-				r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("Cluster %s is Upgraded to release %s", cluster.Name, cluster.Labels[ReleaseVersionLabel]))
+				r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
 				err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
 				if err != nil {
 					return ctrl.Result{}, microerror.Mask(err)

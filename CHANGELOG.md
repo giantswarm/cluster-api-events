@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed MachinePools rollout completion check to verify replica counts match exactly and all referenced nodes are running the expected Kubernetes version.
+- Improved upgrade completion logic to ignore nodes in SchedulingDisabled state that are being drained and terminated.
+- Added support for staged upgrades where MachinePools may be intentionally pinned to older versions than the cluster target version.
+
 ## [0.5.2] - 2025-07-15
 
 ### Fixed

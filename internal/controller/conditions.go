@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	capi "sigs.k8s.io/cluster-api/api/v1beta1"
 	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
 	capiconditions "sigs.k8s.io/cluster-api/util/conditions"
@@ -106,19 +108,77 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		if mp.Spec.Replicas != nil {
 			desiredReplicas = *mp.Spec.Replicas
 		}
+
+		// For MachinePools, we need to ensure that:
+		// 1. Ready/Available replicas match desired replicas exactly (no extra old nodes)
+		// 2. All referenced nodes are running the expected version FOR THIS MACHINEPOOL
+		//    (not necessarily the cluster version, to support staged upgrades)
 		rolloutComplete := desiredReplicas == mp.Status.ReadyReplicas &&
 			desiredReplicas == mp.Status.AvailableReplicas
+
+		// Additional check: verify all node references are running the MachinePool's expected version
+		// This supports staged upgrades where MachinePools may be pinned to older versions
+		allNodesCorrectVersion := true
+		if rolloutComplete && mp.Spec.Template.Spec.Version != nil && *mp.Spec.Template.Spec.Version != "" {
+			expectedVersion := *mp.Spec.Template.Spec.Version
+
+			// Get all nodes referenced by this MachinePool and check their versions
+			for _, nodeRef := range mp.Status.NodeRefs {
+				node := &corev1.Node{}
+				if err := c.Get(ctx, types.NamespacedName{Name: nodeRef.Name}, node); err != nil {
+					log := log.FromContext(ctx)
+					log.V(1).Info("Failed to get node for version check",
+						"machinePool", mp.Name,
+						"node", nodeRef.Name,
+						"error", err)
+					allNodesCorrectVersion = false
+					break
+				}
+
+				// Skip nodes that are being drained/terminated (SchedulingDisabled)
+				// These nodes are in the process of being removed and shouldn't block upgrade completion
+				if node.Spec.Unschedulable {
+					log := log.FromContext(ctx)
+					log.V(1).Info("Skipping unschedulable node in version check",
+						"machinePool", mp.Name,
+						"node", nodeRef.Name,
+						"nodeVersion", node.Status.NodeInfo.KubeletVersion)
+					continue
+				}
+
+				if node.Status.NodeInfo.KubeletVersion != expectedVersion {
+					log := log.FromContext(ctx)
+					log.V(1).Info("Node version mismatch detected",
+						"machinePool", mp.Name,
+						"node", nodeRef.Name,
+						"nodeVersion", node.Status.NodeInfo.KubeletVersion,
+						"expectedVersion", expectedVersion)
+					allNodesCorrectVersion = false
+					break
+				}
+			}
+		}
+
+		rolloutComplete = rolloutComplete && allNodesCorrectVersion
 
 		log := log.FromContext(ctx)
 		log.V(1).Info("Checking MachinePool status",
 			"name", mp.Name,
 			"ready", ready,
 			"rolloutComplete", rolloutComplete,
+			"allNodesCorrectVersion", allNodesCorrectVersion,
 			"versionMatch", versionMatch,
 			"desiredReplicas", desiredReplicas,
 			"readyReplicas", mp.Status.ReadyReplicas,
 			"availableReplicas", mp.Status.AvailableReplicas,
-			"mpVersion", mp.Labels[ReleaseVersionLabel],
+			"nodeRefsCount", len(mp.Status.NodeRefs),
+			"machinePoolExpectedVersion", func() string {
+				if mp.Spec.Template.Spec.Version != nil {
+					return *mp.Spec.Template.Spec.Version
+				}
+				return ""
+			}(),
+			"mpLabelVersion", mp.Labels[ReleaseVersionLabel],
 			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
 			"readyCondition", func() string {
 				if condition := capiconditions.Get(&mp, capi.ReadyCondition); condition != nil {
