@@ -32,6 +32,17 @@ securityContext:
     drop:
       - ALL
 
+# Vertical Pod Autoscaler configuration
+verticalPodAutoscaler:
+  enabled: true
+  updateMode: "Auto"
+  minAllowed:
+    cpu: "100m"
+    memory: "256Mi"
+  maxAllowed:
+    cpu: "1000m"
+    memory: "1Gi"
+
 global:
   podSecurityStandards:
     enforced: false

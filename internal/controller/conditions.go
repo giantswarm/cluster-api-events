@@ -74,9 +74,13 @@ func getWorkloadClusterClient(ctx context.Context, c client.Client, cluster *cap
 
 // checkMachinePoolNodeVersions connects to workload cluster and checks node versions for a MachinePool
 func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capiexp.MachinePool, expectedVersion string) (bool, []string, error) {
-	// List all nodes in the workload cluster
+	// List nodes with minimal fields to reduce memory usage
 	nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("giantswarm.io/machine-pool=%s", mp.Name),
+		// Limit fields to only what we need to reduce memory usage
+		FieldSelector: "spec.unschedulable!=true",
+		// Limit the number of nodes returned to prevent memory issues
+		Limit: 100,
 	})
 	if err != nil {
 		return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s: %w", mp.Name, err)
@@ -86,7 +90,7 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 	allCorrectVersion := true
 
 	for _, node := range nodes.Items {
-		// Skip nodes being drained/cordoned (unschedulable)
+		// Skip nodes being drained/cordoned (unschedulable) - should be filtered by FieldSelector but double-check
 		if node.Spec.Unschedulable {
 			log := log.FromContext(ctx)
 			log.V(1).Info("Skipping unschedulable node in MachinePool version check",
@@ -101,6 +105,15 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 			nodesWithWrongVersion = append(nodesWithWrongVersion,
 				fmt.Sprintf("%s(%s!=%s)", node.Name, node.Status.NodeInfo.KubeletVersion, expectedVersion))
 			allCorrectVersion = false
+
+			// Limit the number of wrong version nodes we track to prevent memory bloat
+			if len(nodesWithWrongVersion) >= 10 {
+				log := log.FromContext(ctx)
+				log.V(1).Info("Truncating wrong version nodes list to prevent memory usage",
+					"machinePool", mp.Name,
+					"totalWrongVersionNodes", "10+")
+				break
+			}
 		}
 	}
 
@@ -255,6 +268,8 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			log.V(1).Info("Failed to get workload cluster client, falling back to basic MachinePool checking",
 				"cluster", cluster.Name,
 				"error", workloadClientErr)
+			// Set to nil to ensure fallback behavior
+			workloadClient = nil
 		}
 	}
 
@@ -284,7 +299,7 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		allNodesCorrectVersion := true
 		var nodesWithWrongVersion []string
 
-		if workloadClient != nil && workloadClientErr == nil {
+		if workloadClient != nil {
 			var err error
 			allNodesCorrectVersion, nodesWithWrongVersion, err = checkMachinePoolNodeVersions(ctx, workloadClient, &mp, expectedVersion)
 			if err != nil {
@@ -323,7 +338,7 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			}(),
 		}
 
-		if workloadClient != nil && workloadClientErr == nil {
+		if workloadClient != nil {
 			logFields = append(logFields,
 				"allNodesCorrectVersion", allNodesCorrectVersion,
 				"workloadClusterAccess", "successful")
