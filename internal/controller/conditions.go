@@ -5,8 +5,10 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	capi "sigs.k8s.io/cluster-api/api/v1beta1"
 	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
 	capiconditions "sigs.k8s.io/cluster-api/util/conditions"
@@ -22,7 +24,7 @@ func isClusterUpgrading(object capiconditions.Getter, condition capi.ConditionTy
 	return capiconditions.IsFalse(object, condition) && capiconditions.GetReason(object, condition) == "RollingUpdateInProgress"
 }
 
-func conditionTimeStampFromReadyState(object capiconditions.Getter, condition capi.ConditionType) (*v1.Time, bool) {
+func conditionTimeStampFromReadyState(object capiconditions.Getter, condition capi.ConditionType) (*metav1.Time, bool) {
 	if isClusterReady(object, condition) {
 		time := capiconditions.GetLastTransitionTime(object, condition)
 		if time != nil {
@@ -34,6 +36,75 @@ func conditionTimeStampFromReadyState(object capiconditions.Getter, condition ca
 
 func isClusterReleaseVersionDifferent(cluster *capi.Cluster) bool {
 	return cluster.Labels[ReleaseVersionLabel] != cluster.Annotations[LastKnownUpgradeVersionAnnotation]
+}
+
+// getWorkloadClusterClient creates a Kubernetes client for the workload cluster
+func getWorkloadClusterClient(ctx context.Context, c client.Client, cluster *capi.Cluster) (kubernetes.Interface, error) {
+	// Get the kubeconfig secret for the workload cluster
+	secretName := fmt.Sprintf("%s-kubeconfig", cluster.Name)
+	secret := &corev1.Secret{}
+
+	if err := c.Get(ctx, types.NamespacedName{
+		Name:      secretName,
+		Namespace: cluster.Namespace,
+	}, secret); err != nil {
+		return nil, fmt.Errorf("failed to get kubeconfig secret %s: %w", secretName, err)
+	}
+
+	// Extract kubeconfig data
+	kubeconfigData, ok := secret.Data["value"]
+	if !ok {
+		return nil, fmt.Errorf("kubeconfig secret %s missing 'value' key", secretName)
+	}
+
+	// Create client config from kubeconfig
+	config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create REST config from kubeconfig: %w", err)
+	}
+
+	// Create Kubernetes client
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kubernetes client: %w", err)
+	}
+
+	return clientset, nil
+}
+
+// checkMachinePoolNodeVersions connects to workload cluster and checks node versions for a MachinePool
+func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capiexp.MachinePool, expectedVersion string) (bool, []string, error) {
+	// List all nodes in the workload cluster
+	nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("giantswarm.io/machine-pool=%s", mp.Name),
+	})
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s: %w", mp.Name, err)
+	}
+
+	var nodesWithWrongVersion []string
+	allCorrectVersion := true
+
+	for _, node := range nodes.Items {
+		// Skip nodes being drained/cordoned (unschedulable)
+		if node.Spec.Unschedulable {
+			log := log.FromContext(ctx)
+			log.V(1).Info("Skipping unschedulable node in MachinePool version check",
+				"machinePool", mp.Name,
+				"node", node.Name,
+				"nodeVersion", node.Status.NodeInfo.KubeletVersion)
+			continue
+		}
+
+		// Check kubelet version
+		if node.Status.NodeInfo.KubeletVersion != expectedVersion {
+			nodesWithWrongVersion = append(nodesWithWrongVersion,
+				fmt.Sprintf("%s(%s!=%s)", node.Name, node.Status.NodeInfo.KubeletVersion, expectedVersion))
+			allCorrectVersion = false
+		}
+	}
+
+	return allCorrectVersion, nodesWithWrongVersion, nil
 }
 
 // areAllWorkerNodesReady checks if all MachineDeployments and MachinePools are ready
@@ -56,20 +127,94 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			desiredReplicas = *md.Spec.Replicas
 		}
 
-		rolloutComplete := desiredReplicas == md.Status.UpdatedReplicas &&
+		// For MachineDeployments, check both basic status and individual machine versions
+		basicRolloutComplete := desiredReplicas == md.Status.UpdatedReplicas &&
 			desiredReplicas == md.Status.ReadyReplicas &&
 			desiredReplicas == md.Status.AvailableReplicas
+
+		// Check individual machines for version consistency (MachineDeployments create Machine resources)
+		allMachinesCorrectVersion := true
+		var expectedVersion string
+		if md.Spec.Template.Spec.Version != nil {
+			expectedVersion = *md.Spec.Template.Spec.Version
+		} else {
+			expectedVersion = cluster.Labels[ReleaseVersionLabel]
+		}
+
+		machines := &capi.MachineList{}
+		if err := c.List(ctx, machines, client.InNamespace(cluster.Namespace), client.MatchingLabels{
+			capi.ClusterNameLabel: cluster.Name,
+		}); err != nil {
+			log := log.FromContext(ctx)
+			log.Error(err, "Failed to list machines for MachineDeployment", "machineDeployment", md.Name)
+			allMachinesCorrectVersion = false
+		} else {
+			var machinesWithWrongVersion []string
+
+			// Filter machines belonging to this MachineDeployment
+			for _, machine := range machines.Items {
+				// Check if machine belongs to this MachineDeployment via OwnerReferences
+				belongsToMD := false
+				for _, ownerRef := range machine.OwnerReferences {
+					if ownerRef.Kind == "MachineSet" {
+						// Get the MachineSet to check if it belongs to our MachineDeployment
+						machineSet := &capi.MachineSet{}
+						if err := c.Get(ctx, client.ObjectKey{
+							Namespace: machine.Namespace,
+							Name:      ownerRef.Name,
+						}, machineSet); err == nil {
+							for _, msOwnerRef := range machineSet.OwnerReferences {
+								if msOwnerRef.Kind == "MachineDeployment" && msOwnerRef.Name == md.Name {
+									belongsToMD = true
+									break
+								}
+							}
+						}
+						break
+					}
+				}
+
+				if !belongsToMD {
+					continue
+				}
+
+				// Skip machines being deleted
+				if !machine.DeletionTimestamp.IsZero() {
+					continue
+				}
+
+				// Check machine version
+				if machine.Spec.Version != nil && *machine.Spec.Version != expectedVersion {
+					machinesWithWrongVersion = append(machinesWithWrongVersion,
+						fmt.Sprintf("%s(%s!=%s)", machine.Name, *machine.Spec.Version, expectedVersion))
+					allMachinesCorrectVersion = false
+				}
+			}
+
+			if len(machinesWithWrongVersion) > 0 {
+				log := log.FromContext(ctx)
+				log.V(1).Info("MachineDeployment has machines with incorrect versions",
+					"machineDeployment", md.Name,
+					"expectedVersion", expectedVersion,
+					"machinesWithWrongVersion", machinesWithWrongVersion)
+			}
+		}
+
+		rolloutComplete := basicRolloutComplete && allMachinesCorrectVersion
 
 		log := log.FromContext(ctx)
 		log.V(1).Info("Checking MachineDeployment status",
 			"name", md.Name,
 			"ready", ready,
+			"basicRolloutComplete", basicRolloutComplete,
+			"allMachinesCorrectVersion", allMachinesCorrectVersion,
 			"rolloutComplete", rolloutComplete,
 			"versionMatch", versionMatch,
 			"desiredReplicas", desiredReplicas,
 			"updatedReplicas", md.Status.UpdatedReplicas,
 			"readyReplicas", md.Status.ReadyReplicas,
 			"availableReplicas", md.Status.AvailableReplicas,
+			"expectedVersion", expectedVersion,
 			"mdVersion", md.Labels[ReleaseVersionLabel],
 			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
 			"readyCondition", func() string {
@@ -98,6 +243,21 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		return false, err
 	}
 
+	// Get workload cluster client for MachinePool node version checking
+	var workloadClient kubernetes.Interface
+	var workloadClientErr error
+
+	// Only try to connect if we have MachinePools to check
+	if len(machinePools.Items) > 0 {
+		workloadClient, workloadClientErr = getWorkloadClusterClient(ctx, c, cluster)
+		if workloadClientErr != nil {
+			log := log.FromContext(ctx)
+			log.V(1).Info("Failed to get workload cluster client, falling back to basic MachinePool checking",
+				"cluster", cluster.Name,
+				"error", workloadClientErr)
+		}
+	}
+
 	var notReadyMPs []string
 	var versionMismatchMPs []string
 	for _, mp := range machinePools.Items {
@@ -109,75 +269,50 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			desiredReplicas = *mp.Spec.Replicas
 		}
 
-		// For MachinePools, we need to ensure that:
-		// 1. Ready/Available replicas match desired replicas exactly (no extra old nodes)
-		// 2. All referenced nodes are running the expected version FOR THIS MACHINEPOOL
-		//    (not necessarily the cluster version, to support staged upgrades)
-		rolloutComplete := desiredReplicas == mp.Status.ReadyReplicas &&
+		// Check basic readiness first
+		basicRolloutComplete := desiredReplicas == mp.Status.ReadyReplicas &&
 			desiredReplicas == mp.Status.AvailableReplicas
 
-		// Additional check: verify all node references are running the MachinePool's expected version
-		// This supports staged upgrades where MachinePools may be pinned to older versions
+		var expectedVersion string
+		if mp.Spec.Template.Spec.Version != nil {
+			expectedVersion = *mp.Spec.Template.Spec.Version
+		} else {
+			expectedVersion = cluster.Labels[ReleaseVersionLabel]
+		}
+
+		// Try to check actual node versions in workload cluster
 		allNodesCorrectVersion := true
-		if rolloutComplete && mp.Spec.Template.Spec.Version != nil && *mp.Spec.Template.Spec.Version != "" {
-			expectedVersion := *mp.Spec.Template.Spec.Version
+		var nodesWithWrongVersion []string
 
-			// Get all nodes referenced by this MachinePool and check their versions
-			for _, nodeRef := range mp.Status.NodeRefs {
-				node := &corev1.Node{}
-				if err := c.Get(ctx, types.NamespacedName{Name: nodeRef.Name}, node); err != nil {
-					log := log.FromContext(ctx)
-					log.V(1).Info("Failed to get node for version check",
-						"machinePool", mp.Name,
-						"node", nodeRef.Name,
-						"error", err)
-					allNodesCorrectVersion = false
-					break
-				}
-
-				// Skip nodes that are being drained/terminated (SchedulingDisabled)
-				// These nodes are in the process of being removed and shouldn't block upgrade completion
-				if node.Spec.Unschedulable {
-					log := log.FromContext(ctx)
-					log.V(1).Info("Skipping unschedulable node in version check",
-						"machinePool", mp.Name,
-						"node", nodeRef.Name,
-						"nodeVersion", node.Status.NodeInfo.KubeletVersion)
-					continue
-				}
-
-				if node.Status.NodeInfo.KubeletVersion != expectedVersion {
-					log := log.FromContext(ctx)
-					log.V(1).Info("Node version mismatch detected",
-						"machinePool", mp.Name,
-						"node", nodeRef.Name,
-						"nodeVersion", node.Status.NodeInfo.KubeletVersion,
-						"expectedVersion", expectedVersion)
-					allNodesCorrectVersion = false
-					break
-				}
+		if workloadClient != nil && workloadClientErr == nil {
+			var err error
+			allNodesCorrectVersion, nodesWithWrongVersion, err = checkMachinePoolNodeVersions(ctx, workloadClient, &mp, expectedVersion)
+			if err != nil {
+				log := log.FromContext(ctx)
+				log.V(1).Info("Failed to check node versions in workload cluster for MachinePool",
+					"machinePool", mp.Name,
+					"error", err)
+				// Fall back to basic checking if workload cluster access fails
+				allNodesCorrectVersion = true
 			}
 		}
 
-		rolloutComplete = rolloutComplete && allNodesCorrectVersion
+		rolloutComplete := basicRolloutComplete && allNodesCorrectVersion
 
 		log := log.FromContext(ctx)
-		log.V(1).Info("Checking MachinePool status",
+		logLevel := log.V(1)
+
+		logFields := []interface{}{
 			"name", mp.Name,
 			"ready", ready,
+			"basicRolloutComplete", basicRolloutComplete,
 			"rolloutComplete", rolloutComplete,
-			"allNodesCorrectVersion", allNodesCorrectVersion,
 			"versionMatch", versionMatch,
 			"desiredReplicas", desiredReplicas,
 			"readyReplicas", mp.Status.ReadyReplicas,
 			"availableReplicas", mp.Status.AvailableReplicas,
 			"nodeRefsCount", len(mp.Status.NodeRefs),
-			"machinePoolExpectedVersion", func() string {
-				if mp.Spec.Template.Spec.Version != nil {
-					return *mp.Spec.Template.Spec.Version
-				}
-				return ""
-			}(),
+			"expectedVersion", expectedVersion,
 			"mpLabelVersion", mp.Labels[ReleaseVersionLabel],
 			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
 			"readyCondition", func() string {
@@ -185,7 +320,23 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 					return fmt.Sprintf("status=%s,reason=%s", condition.Status, condition.Reason)
 				}
 				return "missing"
-			}())
+			}(),
+		}
+
+		if workloadClient != nil && workloadClientErr == nil {
+			logFields = append(logFields,
+				"allNodesCorrectVersion", allNodesCorrectVersion,
+				"workloadClusterAccess", "successful")
+			if len(nodesWithWrongVersion) > 0 {
+				logFields = append(logFields, "nodesWithWrongVersion", nodesWithWrongVersion)
+			}
+		} else {
+			logFields = append(logFields,
+				"workloadClusterAccess", "failed",
+				"fallbackMode", "basic status checking only")
+		}
+
+		logLevel.Info("Checking MachinePool status", logFields...)
 
 		if !ready || !rolloutComplete {
 			notReadyMPs = append(notReadyMPs, mp.Name)
@@ -203,13 +354,22 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 
 	if !allReady {
 		log := log.FromContext(ctx)
-		log.Info("Worker nodes not all ready",
+		logFields := []interface{}{
 			"totalMachineDeployments", len(machineDeployments.Items),
 			"totalMachinePools", len(machinePools.Items),
 			"notReadyMachineDeployments", notReadyMDs,
 			"notReadyMachinePools", notReadyMPs,
 			"versionMismatchMachineDeployments", versionMismatchMDs,
-			"versionMismatchMachinePools", versionMismatchMPs)
+			"versionMismatchMachinePools", versionMismatchMPs,
+		}
+
+		if workloadClient != nil && workloadClientErr == nil {
+			logFields = append(logFields, "machinePoolVersionChecking", "workload cluster node inspection")
+		} else {
+			logFields = append(logFields, "machinePoolVersionChecking", "basic status only (workload cluster access failed)")
+		}
+
+		log.Info("Worker nodes not all ready", logFields...)
 	}
 
 	return allReady, nil

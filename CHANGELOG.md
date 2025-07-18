@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Enhanced MachinePool version checking by connecting to workload clusters to inspect individual node versions.
+- Direct node version validation for MachinePools using `giantswarm.io/machine-pool` labels and workload cluster connectivity.
+- Improved MachineDeployment version checking with individual Machine resource validation through ownership chain traversal.
+- Graceful fallback to basic status checking when workload cluster access fails.
+
 ## [0.5.3] - 2025-07-18
 
 ### Fixed
