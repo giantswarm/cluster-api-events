@@ -12,6 +12,7 @@ import (
 	capi "sigs.k8s.io/cluster-api/api/v1beta1"
 	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
 	capiconditions "sigs.k8s.io/cluster-api/util/conditions"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -61,6 +62,20 @@ func getWorkloadClusterClient(ctx context.Context, c client.Client, cluster *cap
 	config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create REST config from kubeconfig: %w", err)
+	}
+
+	// Check if this kubeconfig points to the same cluster we're running on (management cluster)
+	// Compare the server URL from the kubeconfig with our current cluster
+	// Get the current cluster configuration (where this controller is running)
+	currentConfig := ctrl.GetConfigOrDie()
+	if config.Host == currentConfig.Host {
+		log := log.FromContext(ctx)
+		log.V(1).Info("Detected management cluster self-reference, skipping workload cluster connection",
+			"cluster", cluster.Name,
+			"targetServer", config.Host,
+			"currentServer", currentConfig.Host,
+			"reason", "prevents controller from connecting to itself during MC upgrades")
+		return nil, fmt.Errorf("management cluster self-reference detected - skipping to prevent self-connection")
 	}
 
 	// Create Kubernetes client
@@ -133,7 +148,16 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	var versionMismatchMDs []string
 	for _, md := range machineDeployments.Items {
 		ready := isClusterReady(&md, capi.ReadyCondition)
-		versionMatch := md.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
+		// Check version match - for MachineDeployments, if they have an explicit version set,
+		// that takes precedence over cluster version (allows for pinning)
+		versionMatch := true
+		if md.Spec.Template.Spec.Version != nil {
+			// MachineDeployment has explicit version - check if label matches the explicit version
+			versionMatch = md.Labels[ReleaseVersionLabel] == *md.Spec.Template.Spec.Version
+		} else {
+			// MachineDeployment inherits cluster version - check if label matches cluster version
+			versionMatch = md.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
+		}
 
 		var desiredReplicas int32
 		if md.Spec.Replicas != nil {
@@ -242,10 +266,19 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		}
 
 		if !versionMatch {
-			versionMismatchMDs = append(versionMismatchMDs, fmt.Sprintf("%s(%s->%s)",
-				md.Name,
-				md.Labels[ReleaseVersionLabel],
-				cluster.Labels[ReleaseVersionLabel]))
+			if md.Spec.Template.Spec.Version != nil {
+				// Pinned MachineDeployment with version mismatch
+				versionMismatchMDs = append(versionMismatchMDs, fmt.Sprintf("%s(label:%s!=pinned:%s)",
+					md.Name,
+					md.Labels[ReleaseVersionLabel],
+					*md.Spec.Template.Spec.Version))
+			} else {
+				// Normal MachineDeployment with version mismatch
+				versionMismatchMDs = append(versionMismatchMDs, fmt.Sprintf("%s(label:%s!=cluster:%s)",
+					md.Name,
+					md.Labels[ReleaseVersionLabel],
+					cluster.Labels[ReleaseVersionLabel]))
+			}
 		}
 	}
 
@@ -259,17 +292,38 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	// Get workload cluster client for MachinePool node version checking
 	var workloadClient kubernetes.Interface
 	var workloadClientErr error
+	var isManagementCluster bool
 
 	// Only try to connect if we have MachinePools to check
 	if len(machinePools.Items) > 0 {
 		workloadClient, workloadClientErr = getWorkloadClusterClient(ctx, c, cluster)
 		if workloadClientErr != nil {
-			log := log.FromContext(ctx)
-			log.V(1).Info("Failed to get workload cluster client, falling back to basic MachinePool checking",
-				"cluster", cluster.Name,
-				"error", workloadClientErr)
-			// Set to nil to ensure fallback behavior
-			workloadClient = nil
+			// Check if this is a management cluster self-reference
+			if workloadClientErr.Error() == "management cluster self-reference detected - skipping to prevent self-connection" {
+				// For management cluster, create client from current config
+				currentConfig := ctrl.GetConfigOrDie()
+				clientset, err := kubernetes.NewForConfig(currentConfig)
+				if err != nil {
+					log := log.FromContext(ctx)
+					log.V(1).Info("Failed to create management cluster client, falling back to basic MachinePool checking",
+						"cluster", cluster.Name,
+						"error", err)
+					workloadClient = nil
+				} else {
+					workloadClient = clientset
+					isManagementCluster = true
+					log := log.FromContext(ctx)
+					log.V(1).Info("Using management cluster client for node version checking",
+						"cluster", cluster.Name)
+				}
+			} else {
+				log := log.FromContext(ctx)
+				log.V(1).Info("Failed to get workload cluster client, falling back to basic MachinePool checking",
+					"cluster", cluster.Name,
+					"error", workloadClientErr)
+				// Set to nil to ensure fallback behavior
+				workloadClient = nil
+			}
 		}
 	}
 
@@ -277,7 +331,16 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	var versionMismatchMPs []string
 	for _, mp := range machinePools.Items {
 		ready := isClusterReady(&mp, capi.ReadyCondition)
-		versionMatch := mp.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
+		// Check version match - for MachinePools, if they have an explicit version set,
+		// that takes precedence over cluster version (allows for pinning)
+		versionMatch := true
+		if mp.Spec.Template.Spec.Version != nil {
+			// MachinePool has explicit version - check if label matches the explicit version
+			versionMatch = mp.Labels[ReleaseVersionLabel] == *mp.Spec.Template.Spec.Version
+		} else {
+			// MachinePool inherits cluster version - check if label matches cluster version
+			versionMatch = mp.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
+		}
 
 		var desiredReplicas int32
 		if mp.Spec.Replicas != nil {
@@ -295,7 +358,7 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			expectedVersion = cluster.Labels[ReleaseVersionLabel]
 		}
 
-		// Try to check actual node versions in workload cluster
+		// Try to check actual node versions in workload cluster or management cluster
 		allNodesCorrectVersion := true
 		var nodesWithWrongVersion []string
 
@@ -304,10 +367,16 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			allNodesCorrectVersion, nodesWithWrongVersion, err = checkMachinePoolNodeVersions(ctx, workloadClient, &mp, expectedVersion)
 			if err != nil {
 				log := log.FromContext(ctx)
-				log.V(1).Info("Failed to check node versions in workload cluster for MachinePool",
-					"machinePool", mp.Name,
-					"error", err)
-				// Fall back to basic checking if workload cluster access fails
+				if isManagementCluster {
+					log.V(1).Info("Failed to check node versions in management cluster for MachinePool",
+						"machinePool", mp.Name,
+						"error", err)
+				} else {
+					log.V(1).Info("Failed to check node versions in workload cluster for MachinePool",
+						"machinePool", mp.Name,
+						"error", err)
+				}
+				// Fall back to basic checking if node access fails
 				allNodesCorrectVersion = true
 			}
 		}
@@ -340,15 +409,25 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 
 		if workloadClient != nil {
 			logFields = append(logFields,
-				"allNodesCorrectVersion", allNodesCorrectVersion,
-				"workloadClusterAccess", "successful")
+				"allNodesCorrectVersion", allNodesCorrectVersion)
+			if isManagementCluster {
+				logFields = append(logFields, "clusterAccess", "management cluster (current)")
+			} else {
+				logFields = append(logFields, "workloadClusterAccess", "successful")
+			}
 			if len(nodesWithWrongVersion) > 0 {
 				logFields = append(logFields, "nodesWithWrongVersion", nodesWithWrongVersion)
 			}
 		} else {
-			logFields = append(logFields,
-				"workloadClusterAccess", "failed",
-				"fallbackMode", "basic status checking only")
+			if isManagementCluster {
+				logFields = append(logFields,
+					"clusterAccess", "management cluster failed",
+					"fallbackMode", "basic status checking only")
+			} else {
+				logFields = append(logFields,
+					"workloadClusterAccess", "failed",
+					"fallbackMode", "basic status checking only")
+			}
 		}
 
 		logLevel.Info("Checking MachinePool status", logFields...)
@@ -358,10 +437,19 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		}
 
 		if !versionMatch {
-			versionMismatchMPs = append(versionMismatchMPs, fmt.Sprintf("%s(%s->%s)",
-				mp.Name,
-				mp.Labels[ReleaseVersionLabel],
-				cluster.Labels[ReleaseVersionLabel]))
+			if mp.Spec.Template.Spec.Version != nil {
+				// Pinned MachinePool with version mismatch
+				versionMismatchMPs = append(versionMismatchMPs, fmt.Sprintf("%s(label:%s!=pinned:%s)",
+					mp.Name,
+					mp.Labels[ReleaseVersionLabel],
+					*mp.Spec.Template.Spec.Version))
+			} else {
+				// Normal MachinePool with version mismatch
+				versionMismatchMPs = append(versionMismatchMPs, fmt.Sprintf("%s(label:%s!=cluster:%s)",
+					mp.Name,
+					mp.Labels[ReleaseVersionLabel],
+					cluster.Labels[ReleaseVersionLabel]))
+			}
 		}
 	}
 
