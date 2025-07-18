@@ -14,11 +14,23 @@ rules:
     - machinedeployments/status
     - machinepools
     - machinepools/status
+    - machines
+    - machines/status
+    - machinesets
+    - machinesets/status
   verbs:
     - get
     - list
     - patch
     - update
+    - watch
+- apiGroups:
+    - ""
+  resources:
+    - secrets
+  verbs:
+    - get
+    - list
     - watch
 - apiGroups:
     - coordination.k8s.io
