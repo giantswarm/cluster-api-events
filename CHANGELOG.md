@@ -20,7 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Corrected version matching logic for pinned MachinePools and MachineDeployments that have explicit `spec.template.spec.version` set to allow control plane upgrades while keeping worker nodes at specific versions.
 
-
 ## [0.5.3] - 2025-07-18
 
 ### Fixed
