@@ -203,7 +203,18 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			"fromVersion", cluster.Annotations[LastKnownUpgradeVersionAnnotation],
 			"toVersion", cluster.Labels[ReleaseVersionLabel])
 		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("from release %s to %s", cluster.Annotations[LastKnownUpgradeVersionAnnotation], cluster.Labels[ReleaseVersionLabel]))
-		err := updateLastKnownReleaseVersion(r.Client, cluster, true)
+
+		// Update both version and timestamp when starting upgrade
+		err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
+			c.Annotations[ClusterUpgradingAnnotation] = "true"
+			// Set timestamp to current ready time to prevent it being reset
+			if readyTransition, ok := conditionTimeStampFromReadyState(c, capi.ReadyCondition); ok {
+				c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
+			}
+			// Clear emitted events when starting a new upgrade
+			delete(c.Annotations, EmittedEventsAnnotation)
+		})
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
@@ -220,7 +231,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// ensure last known transition time is set when annotation is missing and cluster is ready when created
 	if lastKnownTransitionTime.IsZero() {
 		log.Info("Initializing cluster upgrade timestamp", "readyTime", readyTransitionTime)
-		err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
+		// Preserve current upgrading state when initializing timestamp
+		isUpgrading := cluster.Annotations[ClusterUpgradingAnnotation] == "true"
+		err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, isUpgrading)
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
@@ -325,18 +338,6 @@ func updateClusterAnnotations(client client.Client, cluster *capi.Cluster, modif
 			return err
 		}
 		return nil
-	})
-}
-
-func updateLastKnownReleaseVersion(client client.Client, cluster *capi.Cluster, isUpgrading bool) error {
-	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
-		c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
-		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
-
-		// Clear emitted events when starting a new upgrade
-		if isUpgrading {
-			delete(c.Annotations, EmittedEventsAnnotation)
-		}
 	})
 }
 
