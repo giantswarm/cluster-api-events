@@ -46,6 +46,7 @@ const (
 	LastKnownUpgradeVersionAnnotation   = "giantswarm.io/last-known-cluster-upgrade-version"
 	LastKnownUpgradeTimestampAnnotation = "giantswarm.io/last-known-cluster-upgrade-timestamp"
 	ClusterUpgradingAnnotation          = "giantswarm.io/cluster-upgrading"
+	EmittedEventsAnnotation             = "giantswarm.io/emitted-upgrade-events"
 )
 
 // ClusterReconciler reconciles a Cluster object
@@ -202,7 +203,18 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			"fromVersion", cluster.Annotations[LastKnownUpgradeVersionAnnotation],
 			"toVersion", cluster.Labels[ReleaseVersionLabel])
 		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("from release %s to %s", cluster.Annotations[LastKnownUpgradeVersionAnnotation], cluster.Labels[ReleaseVersionLabel]))
-		err := updateLastKnownReleaseVersion(r.Client, cluster, true)
+
+		// Update both version and timestamp when starting upgrade
+		err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
+			c.Annotations[ClusterUpgradingAnnotation] = "true"
+			// Set timestamp to current ready time to prevent it being reset
+			if readyTransition, ok := conditionTimeStampFromReadyState(c, capi.ReadyCondition); ok {
+				c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
+			}
+			// Clear emitted events when starting a new upgrade
+			delete(c.Annotations, EmittedEventsAnnotation)
+		})
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
@@ -219,7 +231,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// ensure last known transition time is set when annotation is missing and cluster is ready when created
 	if lastKnownTransitionTime.IsZero() {
 		log.Info("Initializing cluster upgrade timestamp", "readyTime", readyTransitionTime)
-		err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
+		// Preserve current upgrading state when initializing timestamp
+		isUpgrading := cluster.Annotations[ClusterUpgradingAnnotation] == "true"
+		err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, isUpgrading)
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
@@ -245,6 +259,23 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				"versionsMatch", versionsMatch,
 				"lastTransitionTime", lastKnownTransitionTime,
 				"currentReadyTime", readyTransitionTime)
+
+			// Control plane completed event (only sent once)
+			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane"
+
+			if controlPlaneReady && timeProgressed && versionsMatch && !controlPlaneEventSent {
+				log.Info("Control plane upgraded")
+				r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
+					fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
+
+				// Mark event as sent
+				err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+					c.Annotations[EmittedEventsAnnotation] = "UpgradedControlPlane"
+				})
+				if err != nil {
+					log.Error(err, "Failed to update control plane event annotation")
+				}
+			}
 
 			// Only send upgrade complete event when both control plane AND worker nodes are ready
 			sendUpgradeEvent := controlPlaneReady &&
@@ -314,13 +345,11 @@ func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, 
 	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
 		c.Annotations[LastKnownUpgradeTimestampAnnotation] = transitionTime.Format(time.RFC3339)
 		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
-	})
-}
 
-func updateLastKnownReleaseVersion(client client.Client, cluster *capi.Cluster, isUpgrading bool) error {
-	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
-		c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
-		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
+		// Clear emitted events when upgrade completes
+		if !isUpgrading {
+			delete(c.Annotations, EmittedEventsAnnotation)
+		}
 	})
 }
 

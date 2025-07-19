@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Intermediate upgrade progress event `UpgradedControlPlane` when control plane upgrade completes during cluster upgrades.
+- Event deduplication using `giantswarm.io/emitted-upgrade-events` annotation to prevent repeated notifications.
+
+### Fixed
+
+- Fixed version comparison logic that was comparing incompatible version formats (release version "31.0.0" vs Kubernetes version "v1.31.9"). Now correctly compares release version labels to determine if MachineDeployments and MachinePools match the cluster version.
+- Fixed upgrade state being lost when timestamp annotation was missing. Now properly preserves upgrade state and sets timestamp when upgrade begins.
+- Fixed race condition where control plane and final upgrade events could fire simultaneously on controller restart.
+
 ## [0.6.0] - 2025-07-18
 
 ### Added
