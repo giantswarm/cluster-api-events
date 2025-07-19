@@ -148,16 +148,9 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	var versionMismatchMDs []string
 	for _, md := range machineDeployments.Items {
 		ready := isClusterReady(&md, capi.ReadyCondition)
-		// Check version match - for MachineDeployments, if they have an explicit version set,
-		// that takes precedence over cluster version (allows for pinning)
-		versionMatch := true
-		if md.Spec.Template.Spec.Version != nil {
-			// MachineDeployment has explicit version - check if label matches the explicit version
-			versionMatch = md.Labels[ReleaseVersionLabel] == *md.Spec.Template.Spec.Version
-		} else {
-			// MachineDeployment inherits cluster version - check if label matches cluster version
-			versionMatch = md.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
-		}
+		// Check version match - MachineDeployment label should match cluster version
+		// This indicates the MachineDeployment is configured for the right release
+		versionMatch := md.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
 
 		var desiredReplicas int32
 		if md.Spec.Replicas != nil {
@@ -266,19 +259,11 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		}
 
 		if !versionMatch {
-			if md.Spec.Template.Spec.Version != nil {
-				// Pinned MachineDeployment with version mismatch
-				versionMismatchMDs = append(versionMismatchMDs, fmt.Sprintf("%s(label:%s!=pinned:%s)",
-					md.Name,
-					md.Labels[ReleaseVersionLabel],
-					*md.Spec.Template.Spec.Version))
-			} else {
-				// Normal MachineDeployment with version mismatch
-				versionMismatchMDs = append(versionMismatchMDs, fmt.Sprintf("%s(label:%s!=cluster:%s)",
-					md.Name,
-					md.Labels[ReleaseVersionLabel],
-					cluster.Labels[ReleaseVersionLabel]))
-			}
+			// MachineDeployment version mismatch - label doesn't match cluster
+			versionMismatchMDs = append(versionMismatchMDs, fmt.Sprintf("%s(label:%s!=cluster:%s)",
+				md.Name,
+				md.Labels[ReleaseVersionLabel],
+				cluster.Labels[ReleaseVersionLabel]))
 		}
 	}
 
@@ -331,16 +316,10 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	var versionMismatchMPs []string
 	for _, mp := range machinePools.Items {
 		ready := isClusterReady(&mp, capi.ReadyCondition)
-		// Check version match - for MachinePools, if they have an explicit version set,
-		// that takes precedence over cluster version (allows for pinning)
-		versionMatch := true
-		if mp.Spec.Template.Spec.Version != nil {
-			// MachinePool has explicit version - check if label matches the explicit version
-			versionMatch = mp.Labels[ReleaseVersionLabel] == *mp.Spec.Template.Spec.Version
-		} else {
-			// MachinePool inherits cluster version - check if label matches cluster version
-			versionMatch = mp.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
-		}
+		// Check version match - MachinePool label should match cluster version
+		// Note: mp.Spec.Template.Spec.Version uses Kubernetes version format (v1.31.9)
+		// while labels use release version format (31.0.0), so we can't compare them directly
+		versionMatch := mp.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
 
 		var desiredReplicas int32
 		if mp.Spec.Replicas != nil {
@@ -437,19 +416,11 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		}
 
 		if !versionMatch {
-			if mp.Spec.Template.Spec.Version != nil {
-				// Pinned MachinePool with version mismatch
-				versionMismatchMPs = append(versionMismatchMPs, fmt.Sprintf("%s(label:%s!=pinned:%s)",
-					mp.Name,
-					mp.Labels[ReleaseVersionLabel],
-					*mp.Spec.Template.Spec.Version))
-			} else {
-				// Normal MachinePool with version mismatch
-				versionMismatchMPs = append(versionMismatchMPs, fmt.Sprintf("%s(label:%s!=cluster:%s)",
-					mp.Name,
-					mp.Labels[ReleaseVersionLabel],
-					cluster.Labels[ReleaseVersionLabel]))
-			}
+			// MachinePool version mismatch - label doesn't match cluster
+			versionMismatchMPs = append(versionMismatchMPs, fmt.Sprintf("%s(label:%s!=cluster:%s)",
+				mp.Name,
+				mp.Labels[ReleaseVersionLabel],
+				cluster.Labels[ReleaseVersionLabel]))
 		}
 	}
 
