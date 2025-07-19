@@ -46,6 +46,7 @@ const (
 	LastKnownUpgradeVersionAnnotation   = "giantswarm.io/last-known-cluster-upgrade-version"
 	LastKnownUpgradeTimestampAnnotation = "giantswarm.io/last-known-cluster-upgrade-timestamp"
 	ClusterUpgradingAnnotation          = "giantswarm.io/cluster-upgrading"
+	EmittedEventsAnnotation             = "giantswarm.io/emitted-upgrade-events"
 )
 
 // ClusterReconciler reconciles a Cluster object
@@ -246,6 +247,23 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				"lastTransitionTime", lastKnownTransitionTime,
 				"currentReadyTime", readyTransitionTime)
 
+			// Control plane completed event (only sent once)
+			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane"
+
+			if controlPlaneReady && timeProgressed && versionsMatch && !controlPlaneEventSent {
+				log.Info("Control plane upgraded")
+				r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
+					fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
+
+				// Mark event as sent
+				err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+					c.Annotations[EmittedEventsAnnotation] = "UpgradedControlPlane"
+				})
+				if err != nil {
+					log.Error(err, "Failed to update control plane event annotation")
+				}
+			}
+
 			// Only send upgrade complete event when both control plane AND worker nodes are ready
 			sendUpgradeEvent := controlPlaneReady &&
 				allWorkerNodesReady &&
@@ -310,17 +328,27 @@ func updateClusterAnnotations(client client.Client, cluster *capi.Cluster, modif
 	})
 }
 
-func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, transitionTime time.Time, isUpgrading bool) error {
-	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
-		c.Annotations[LastKnownUpgradeTimestampAnnotation] = transitionTime.Format(time.RFC3339)
-		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
-	})
-}
-
 func updateLastKnownReleaseVersion(client client.Client, cluster *capi.Cluster, isUpgrading bool) error {
 	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
 		c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
+
+		// Clear emitted events when starting a new upgrade
+		if isUpgrading {
+			delete(c.Annotations, EmittedEventsAnnotation)
+		}
+	})
+}
+
+func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, transitionTime time.Time, isUpgrading bool) error {
+	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
+		c.Annotations[LastKnownUpgradeTimestampAnnotation] = transitionTime.Format(time.RFC3339)
+		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
+
+		// Clear emitted events when upgrade completes
+		if !isUpgrading {
+			delete(c.Annotations, EmittedEventsAnnotation)
+		}
 	})
 }
 

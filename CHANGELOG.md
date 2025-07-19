@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Intermediate upgrade progress event `UpgradedControlPlane` when control plane upgrade completes during cluster upgrades.
+- Event deduplication using `giantswarm.io/emitted-upgrade-events` annotation to prevent repeated notifications.
+
 ## [0.6.0] - 2025-07-18
 
 ### Added
