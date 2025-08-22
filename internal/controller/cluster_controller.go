@@ -28,8 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
-	capi "sigs.k8s.io/cluster-api/api/v1beta1"
-	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
+	capi "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -375,9 +374,9 @@ func (r *ClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 		).
 		Watches(
-			&capiexp.MachinePool{},
+			&capi.MachinePool{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				mp := obj.(*capiexp.MachinePool)
+				mp := obj.(*capi.MachinePool)
 				if clusterName, ok := mp.Labels[capi.ClusterNameLabel]; ok {
 					return []reconcile.Request{
 						{

@@ -9,23 +9,22 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	capi "sigs.k8s.io/cluster-api/api/v1beta1"
-	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
+	capi "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	capiconditions "sigs.k8s.io/cluster-api/util/conditions"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func isClusterReady(object capiconditions.Getter, condition capi.ConditionType) bool {
+func isClusterReady(object capiconditions.Getter, condition string) bool {
 	return capiconditions.IsTrue(object, condition)
 }
 
-func isClusterUpgrading(object capiconditions.Getter, condition capi.ConditionType) bool {
-	return capiconditions.IsFalse(object, condition) && capiconditions.GetReason(object, condition) == "RollingUpdateInProgress"
+func isClusterUpgrading(object capiconditions.Getter, condition string) bool {
+	return capiconditions.IsFalse(object, condition) && capiconditions.IsTrue(object, capi.RollingOutCondition)
 }
 
-func conditionTimeStampFromReadyState(object capiconditions.Getter, condition capi.ConditionType) (*metav1.Time, bool) {
+func conditionTimeStampFromReadyState(object capiconditions.Getter, condition string) (*metav1.Time, bool) {
 	if isClusterReady(object, condition) {
 		time := capiconditions.GetLastTransitionTime(object, condition)
 		if time != nil {
@@ -88,7 +87,7 @@ func getWorkloadClusterClient(ctx context.Context, c client.Client, cluster *cap
 }
 
 // checkMachinePoolNodeVersions connects to workload cluster and checks node versions for a MachinePool
-func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capiexp.MachinePool, expectedVersion string) (bool, []string, error) {
+func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capi.MachinePool, expectedVersion string) (bool, []string, error) {
 	// List nodes with minimal fields to reduce memory usage
 	nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("giantswarm.io/machine-pool=%s", mp.Name),
@@ -158,15 +157,15 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		}
 
 		// For MachineDeployments, check both basic status and individual machine versions
-		basicRolloutComplete := desiredReplicas == md.Status.UpdatedReplicas &&
-			desiredReplicas == md.Status.ReadyReplicas &&
-			desiredReplicas == md.Status.AvailableReplicas
+		basicRolloutComplete := desiredReplicas == *md.Status.Replicas &&
+			desiredReplicas == *md.Status.ReadyReplicas &&
+			desiredReplicas == *md.Status.AvailableReplicas
 
 		// Check individual machines for version consistency (MachineDeployments create Machine resources)
 		allMachinesCorrectVersion := true
 		var expectedVersion string
-		if md.Spec.Template.Spec.Version != nil {
-			expectedVersion = *md.Spec.Template.Spec.Version
+		if md.Spec.Template.Spec.Version != "" {
+			expectedVersion = md.Spec.Template.Spec.Version
 		} else {
 			expectedVersion = cluster.Labels[ReleaseVersionLabel]
 		}
@@ -214,9 +213,9 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 				}
 
 				// Check machine version
-				if machine.Spec.Version != nil && *machine.Spec.Version != expectedVersion {
+				if machine.Spec.Version != "" && machine.Spec.Version != expectedVersion {
 					machinesWithWrongVersion = append(machinesWithWrongVersion,
-						fmt.Sprintf("%s(%s!=%s)", machine.Name, *machine.Spec.Version, expectedVersion))
+						fmt.Sprintf("%s(%s!=%s)", machine.Name, machine.Spec.Version, expectedVersion))
 					allMachinesCorrectVersion = false
 				}
 			}
@@ -241,9 +240,9 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			"rolloutComplete", rolloutComplete,
 			"versionMatch", versionMatch,
 			"desiredReplicas", desiredReplicas,
-			"updatedReplicas", md.Status.UpdatedReplicas,
-			"readyReplicas", md.Status.ReadyReplicas,
-			"availableReplicas", md.Status.AvailableReplicas,
+			"updatedReplicas", md.Status.Replicas,
+			"readyReplicas", *md.Status.ReadyReplicas,
+			"availableReplicas", *md.Status.AvailableReplicas,
 			"expectedVersion", expectedVersion,
 			"mdVersion", md.Labels[ReleaseVersionLabel],
 			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
@@ -267,7 +266,7 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		}
 	}
 
-	machinePools := &capiexp.MachinePoolList{}
+	machinePools := &capi.MachinePoolList{}
 	if err := c.List(ctx, machinePools, client.InNamespace(cluster.Namespace), client.MatchingLabels{
 		capi.ClusterNameLabel: cluster.Name,
 	}); err != nil {
@@ -327,12 +326,12 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		}
 
 		// Check basic readiness first
-		basicRolloutComplete := desiredReplicas == mp.Status.ReadyReplicas &&
-			desiredReplicas == mp.Status.AvailableReplicas
+		basicRolloutComplete := desiredReplicas == *mp.Status.ReadyReplicas &&
+			desiredReplicas == *mp.Status.AvailableReplicas
 
 		var expectedVersion string
-		if mp.Spec.Template.Spec.Version != nil {
-			expectedVersion = *mp.Spec.Template.Spec.Version
+		if mp.Spec.Template.Spec.Version != "" {
+			expectedVersion = mp.Spec.Template.Spec.Version
 		} else {
 			expectedVersion = cluster.Labels[ReleaseVersionLabel]
 		}
@@ -372,8 +371,8 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			"rolloutComplete", rolloutComplete,
 			"versionMatch", versionMatch,
 			"desiredReplicas", desiredReplicas,
-			"readyReplicas", mp.Status.ReadyReplicas,
-			"availableReplicas", mp.Status.AvailableReplicas,
+			"readyReplicas", *mp.Status.ReadyReplicas,
+			"availableReplicas", *mp.Status.AvailableReplicas,
 			"nodeRefsCount", len(mp.Status.NodeRefs),
 			"expectedVersion", expectedVersion,
 			"mpLabelVersion", mp.Labels[ReleaseVersionLabel],
@@ -465,7 +464,7 @@ func areAnyWorkerNodesUpgrading(ctx context.Context, c client.Client, cluster *c
 		}
 	}
 
-	machinePools := &capiexp.MachinePoolList{}
+	machinePools := &capi.MachinePoolList{}
 	if err := c.List(ctx, machinePools, client.InNamespace(cluster.Namespace), client.MatchingLabels{
 		capi.ClusterNameLabel: cluster.Name,
 	}); err != nil {
