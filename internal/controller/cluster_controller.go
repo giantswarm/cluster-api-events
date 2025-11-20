@@ -284,10 +284,11 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				versionsMatch
 
 			if sendUpgradeEvent {
+				duration := readyTransitionTime.Sub(lastKnownTransitionTime).Round(time.Second)
 				log.Info("Cluster upgrade completed successfully",
 					"version", cluster.Labels[ReleaseVersionLabel],
-					"duration", readyTransitionTime.Sub(lastKnownTransitionTime))
-				r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
+					"duration", duration)
+				r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("to release %s in %s", cluster.Labels[ReleaseVersionLabel], duration))
 				err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
 				if err != nil {
 					return ctrl.Result{}, microerror.Mask(err)

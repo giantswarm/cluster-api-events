@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add duration time when cluster upgrade is finished.
+
 ## [0.7.0] - 2025-07-19
 
 ### Added
