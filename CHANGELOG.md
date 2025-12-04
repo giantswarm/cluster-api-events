@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Switched to using `Available` condition for Cluster status checks instead of deprecated `Ready` condition, aligning with CAPI v1beta2.
+- Updated upgrade detection to rely on the `RollingOut` condition, providing more reliable detection of ongoing upgrades.
+
+
 ## [0.7.0] - 2025-07-19
 
 ### Added

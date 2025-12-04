@@ -183,7 +183,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, microerror.Mask(err)
 	}
 
-	controlPlaneUpgrading := isClusterUpgrading(cluster, capi.ReadyCondition)
+	controlPlaneUpgrading := isClusterUpgrading(cluster)
 	releaseVersionDifferent := isClusterReleaseVersionDifferent(cluster)
 
 	if controlPlaneUpgrading || workerNodesUpgrading || releaseVersionDifferent {
@@ -207,8 +207,8 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			c.Annotations[ClusterUpgradingAnnotation] = "true"
-			// Set timestamp to current ready time to prevent it being reset
-			if readyTransition, ok := conditionTimeStampFromReadyState(c, capi.ReadyCondition); ok {
+			// Set timestamp to current available time to prevent it being reset
+			if readyTransition, ok := conditionTimeStampFromAvailableState(c, capi.AvailableCondition); ok {
 				c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
 			}
 			// Clear emitted events when starting a new upgrade
@@ -219,10 +219,10 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// wait for cluster is ready the first time
-	readyTransition, ok := conditionTimeStampFromReadyState(cluster, capi.ReadyCondition)
+	// wait for cluster is available the first time
+	readyTransition, ok := conditionTimeStampFromAvailableState(cluster, capi.AvailableCondition)
 	if !ok {
-		log.V(1).Info("Cluster control plane not ready yet, waiting...")
+		log.V(1).Info("Cluster control plane not available yet, waiting...")
 		return ctrl.Result{}, nil
 	}
 	readyTransitionTime := readyTransition.UTC()
@@ -247,7 +247,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				return ctrl.Result{}, microerror.Mask(err)
 			}
 
-			controlPlaneReady := isClusterReady(cluster, capi.ReadyCondition)
+			controlPlaneReady := isClusterReady(cluster, capi.AvailableCondition)
 			timeProgressed := readyTransitionTime.After(lastKnownTransitionTime)
 			versionsMatch := !isClusterReleaseVersionDifferent(cluster)
 

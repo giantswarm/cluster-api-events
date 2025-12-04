@@ -20,11 +20,11 @@ func isClusterReady(object capiconditions.Getter, condition string) bool {
 	return capiconditions.IsTrue(object, condition)
 }
 
-func isClusterUpgrading(object capiconditions.Getter, condition string) bool {
-	return capiconditions.IsFalse(object, condition) && capiconditions.IsTrue(object, capi.RollingOutCondition)
+func isClusterUpgrading(object capiconditions.Getter) bool {
+	return capiconditions.IsTrue(object, capi.RollingOutCondition)
 }
 
-func conditionTimeStampFromReadyState(object capiconditions.Getter, condition string) (*metav1.Time, bool) {
+func conditionTimeStampFromAvailableState(object capiconditions.Getter, condition string) (*metav1.Time, bool) {
 	if isClusterReady(object, condition) {
 		time := capiconditions.GetLastTransitionTime(object, condition)
 		if time != nil {
@@ -459,7 +459,7 @@ func areAnyWorkerNodesUpgrading(ctx context.Context, c client.Client, cluster *c
 
 	var upgradingMDs []string
 	for _, md := range machineDeployments.Items {
-		if isClusterUpgrading(&md, capi.ReadyCondition) {
+		if isClusterUpgrading(&md) {
 			upgradingMDs = append(upgradingMDs, md.Name)
 		}
 	}
@@ -473,7 +473,7 @@ func areAnyWorkerNodesUpgrading(ctx context.Context, c client.Client, cluster *c
 
 	var upgradingMPs []string
 	for _, mp := range machinePools.Items {
-		if isClusterUpgrading(&mp, capi.ReadyCondition) {
+		if isClusterUpgrading(&mp) {
 			upgradingMPs = append(upgradingMPs, mp.Name)
 		}
 	}
