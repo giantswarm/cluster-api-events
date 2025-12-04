@@ -185,18 +185,26 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	controlPlaneUpgrading := isClusterUpgrading(cluster)
 	releaseVersionDifferent := isClusterReleaseVersionDifferent(cluster)
+	// Check if we're currently marked as upgrading to avoid duplicate events
+	currentlyMarkedAsUpgrading := cluster.Annotations[ClusterUpgradingAnnotation] == "true"
 
-	if controlPlaneUpgrading || workerNodesUpgrading || releaseVersionDifferent {
+	if controlPlaneUpgrading || workerNodesUpgrading || releaseVersionDifferent || currentlyMarkedAsUpgrading {
 		log.Info("Cluster upgrade status check",
 			"controlPlaneUpgrading", controlPlaneUpgrading,
 			"workerNodesUpgrading", workerNodesUpgrading,
 			"releaseVersionDifferent", releaseVersionDifferent,
 			"currentVersion", cluster.Labels[ReleaseVersionLabel],
 			"lastKnownVersion", cluster.Annotations[LastKnownUpgradeVersionAnnotation],
-			"clusterUpgrading", cluster.Annotations[ClusterUpgradingAnnotation])
+			"clusterUpgrading", cluster.Annotations[ClusterUpgradingAnnotation],
+			"currentlyMarkedAsUpgrading", currentlyMarkedAsUpgrading)
 	}
 
-	sendUpgradingEvent := (controlPlaneUpgrading || workerNodesUpgrading) && releaseVersionDifferent
+	// Send upgrading event when:
+	// 1. Release version is different (label changed)
+	// 2. AND we haven't already marked this cluster as upgrading (avoid duplicate events)
+	// Note: We don't require controlPlaneUpgrading or workerNodesUpgrading here because
+	// the RollingOutCondition may not be set immediately or consistently by all providers
+	sendUpgradingEvent := releaseVersionDifferent && !currentlyMarkedAsUpgrading
 	if sendUpgradingEvent {
 		log.Info("Cluster upgrade started",
 			"fromVersion", cluster.Annotations[LastKnownUpgradeVersionAnnotation],
@@ -346,8 +354,9 @@ func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, 
 		c.Annotations[LastKnownUpgradeTimestampAnnotation] = transitionTime.Format(time.RFC3339)
 		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
 
-		// Clear emitted events when upgrade completes
+		// When upgrade completes, update the last known version to current version
 		if !isUpgrading {
+			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			delete(c.Annotations, EmittedEventsAnnotation)
 		}
 	})

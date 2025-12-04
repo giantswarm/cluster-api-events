@@ -10,7 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Switched to using `Available` condition for Cluster status checks instead of deprecated `Ready` condition, aligning with CAPI v1beta2.
-- Updated upgrade detection to rely on the `RollingOut` condition, providing more reliable detection of ongoing upgrades.
+
+### Fixed
+
+- Fixed upgrade event detection with v1beta2 to send "Upgrading" events when release version changes, regardless of `RollingOutCondition` state. The `RollingOutCondition` may not be set immediately or consistently by all infrastructure/control plane providers during version upgrades.
+- Fixed `last-known-cluster-upgrade-version` annotation not being updated when upgrade completes, which would cause incorrect version comparison on subsequent upgrades.
 
 ## [0.8.0] - 2025-11-20
 
