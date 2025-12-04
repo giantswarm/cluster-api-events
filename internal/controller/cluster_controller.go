@@ -259,8 +259,12 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			timeProgressed := readyTransitionTime.After(lastKnownTransitionTime)
 			versionsMatch := !isClusterReleaseVersionDifferent(cluster)
 
+			// Check if control plane machines are up-to-date (v1beta2)
+			controlPlaneUpToDate := isClusterReady(cluster, capi.ClusterControlPlaneMachinesUpToDateCondition)
+
 			log.Info("Upgrade in progress - checking completion criteria",
 				"controlPlaneReady", controlPlaneReady,
+				"controlPlaneUpToDate", controlPlaneUpToDate,
 				"allWorkerNodesReady", allWorkerNodesReady,
 				"timeProgressed", timeProgressed,
 				"versionsMatch", versionsMatch,
@@ -270,7 +274,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Control plane completed event (only sent once)
 			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane"
 
-			if controlPlaneReady && timeProgressed && versionsMatch && !controlPlaneEventSent {
+			if controlPlaneReady && controlPlaneUpToDate && timeProgressed && versionsMatch && !controlPlaneEventSent {
 				log.Info("Control plane upgraded")
 				r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
 					fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
@@ -284,8 +288,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				}
 			}
 
-			// Only send upgrade complete event when both control plane AND worker nodes are ready
+			// Only send upgrade complete event when both control plane AND worker nodes are ready and up-to-date
 			sendUpgradeEvent := controlPlaneReady &&
+				controlPlaneUpToDate &&
 				allWorkerNodesReady &&
 				timeProgressed &&
 				versionsMatch
@@ -305,6 +310,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				reasons := []string{}
 				if !controlPlaneReady {
 					reasons = append(reasons, "control plane not ready")
+				}
+				if !controlPlaneUpToDate {
+					reasons = append(reasons, "control plane not up-to-date")
 				}
 				if !allWorkerNodesReady {
 					reasons = append(reasons, "worker nodes not ready")

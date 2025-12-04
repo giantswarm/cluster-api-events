@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fixed upgrade event detection with v1beta2 to send "Upgrading" events when release version changes, regardless of `RollingOutCondition` state. The `RollingOutCondition` may not be set immediately or consistently by all infrastructure/control plane providers during version upgrades.
 - Fixed `last-known-cluster-upgrade-version` annotation not being updated when upgrade completes, which would cause incorrect version comparison on subsequent upgrades.
+- Fixed control plane upgrade event firing too early by adding check for `ControlPlaneMachinesUpToDate` condition. Event now waits for all control plane machines to be upgraded and up-to-date.
 
 ## [0.8.0] - 2025-11-20
 
