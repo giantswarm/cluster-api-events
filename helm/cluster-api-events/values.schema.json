@@ -72,17 +72,6 @@
                 }
             }
         },
-        "project": {
-            "type": "object",
-            "properties": {
-                "branch": {
-                    "type": "string"
-                },
-                "commit": {
-                    "type": "string"
-                }
-            }
-        },
         "securityContext": {
             "type": "object",
             "properties": {

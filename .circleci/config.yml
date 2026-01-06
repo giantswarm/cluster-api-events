@@ -1,7 +1,7 @@
 version: 2.1
 
 orbs:
-  architect: giantswarm/architect@6.3.2
+  architect: giantswarm/architect@6.11.0
 
 workflows:
   package-and-push-chart-on-tag:
@@ -31,6 +31,7 @@ workflows:
 
       - architect/push-to-app-catalog:
           context: architect
+          executor: app-build-suite
           name: push-to-app-catalog
           app_catalog: control-plane-catalog
           app_catalog_test: control-plane-test-catalog
