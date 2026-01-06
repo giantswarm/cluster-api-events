@@ -27,6 +27,7 @@ securityContext:
   capabilities:
     drop:
       - ALL
+  readOnlyRootFilesystem: true
 
 # Vertical Pod Autoscaler configuration
 verticalPodAutoscaler:
