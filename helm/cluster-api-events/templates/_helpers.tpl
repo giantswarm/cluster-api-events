@@ -28,8 +28,6 @@ Common labels
 {{ include "labels.selector" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-application.giantswarm.io/branch: {{ .Values.project.branch | replace "#" "-" | replace "/" "-" | replace "." "-" | trunc 63 | trimSuffix "-" | quote }}
-application.giantswarm.io/commit: {{ .Values.project.commit | quote }}
 application.giantswarm.io/team: {{ index .Chart.Annotations "application.giantswarm.io/team" | quote }}
 giantswarm.io/managed-by: {{ .Release.Name | quote }}
 giantswarm.io/service-type: {{ .Values.serviceType }}
@@ -57,4 +55,15 @@ giantswarm
 
 {{- define "resource.networkPolicy.name" -}}
 {{- include "resource.default.name" . -}}-network-policy
+{{- end -}}
+
+{{/*
+Image tag helper
+*/}}
+{{- define "image.tag" -}}
+{{- if .Values.image.tag -}}
+{{- .Values.image.tag -}}
+{{- else -}}
+{{- .Chart.AppVersion -}}
+{{- end -}}
 {{- end -}}
