@@ -51,7 +51,10 @@ const (
 	// MinUpgradeDuration is the minimum time that must pass after an upgrade starts
 	// before we consider it complete. This prevents race conditions where CAPI
 	// conditions haven't been updated yet to reflect the upgrade in progress.
-	MinUpgradeDuration = 60 * time.Second
+	//
+	// This is conservative - if the reconciler is slow due to high load, we may
+	// wait longer than necessary, but this prevents false completion events.
+	MinUpgradeDuration = 30 * time.Second
 )
 
 // ClusterReconciler reconciles a Cluster object
