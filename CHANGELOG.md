@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed clusters getting stuck in "upgrading" state forever because `timeProgressed` check required the `AvailableCondition.lastTransitionTime` to change, but clusters often stay Available throughout upgrades. Replaced with `RollingOut: False` condition check.
 - Fixed upgrade completion detection by using Cluster-level v1beta2 conditions (`WorkerMachinesReady`, `WorkerMachinesUpToDate`) as primary source instead of checking individual MachinePool conditions.
 - Skip Karpenter-managed MachinePools (annotation: `cluster.x-k8s.io/replicas-managed-by: external-autoscaler`) in individual resource checks since they are externally managed; rely on Cluster-level conditions for these pools.
+- Fixed race condition where upgrade completion events were sent immediately after upgrade started, before CAPI had time to update conditions. Added minimum upgrade duration check (60 seconds) and new `giantswarm.io/upgrade-start-time` annotation to track actual upgrade start time.
 
 ## [1.0.0] - 2026-01-16
 
