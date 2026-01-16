@@ -266,6 +266,24 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					upgradeStartTime = t
 					minDurationPassed = time.Since(upgradeStartTime) >= MinUpgradeDuration
 				}
+			} else {
+				// Annotation missing - this is an upgrade that started before this fix was deployed,
+				// or controller restarted. Use the last known transition time as fallback.
+				// If that's also missing or recent, use a safe default.
+				if !lastKnownTransitionTime.IsZero() {
+					upgradeStartTime = lastKnownTransitionTime
+					minDurationPassed = time.Since(lastKnownTransitionTime) >= MinUpgradeDuration
+				} else {
+					// No timing info available - set the annotation now and wait
+					log.Info("Missing upgrade start time annotation, setting it now")
+					if err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+						c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+					}); err != nil {
+						log.Error(err, "Failed to set upgrade start time annotation")
+					}
+					// Don't pass yet, wait for next reconcile
+					minDurationPassed = false
+				}
 			}
 
 			// In v1beta2, we use Cluster-level conditions which are more reliable than checking individual MachinePool conditions
