@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-01-16
+
 ### Changed
 
 - Switched to using `Available` condition for Cluster status checks instead of deprecated `Ready` condition, aligning with CAPI v1beta2.
@@ -142,7 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.8.0...v1.0.0
 [0.8.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.5.3...v0.6.0
