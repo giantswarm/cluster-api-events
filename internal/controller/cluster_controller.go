@@ -46,12 +46,6 @@ const (
 	LastKnownUpgradeTimestampAnnotation = "giantswarm.io/last-known-cluster-upgrade-timestamp"
 	ClusterUpgradingAnnotation          = "giantswarm.io/cluster-upgrading"
 	EmittedEventsAnnotation             = "giantswarm.io/emitted-upgrade-events"
-	UpgradeStartTimeAnnotation          = "giantswarm.io/upgrade-start-time"
-
-	// MinUpgradeDuration is the minimum time that must pass after an upgrade starts
-	// before we consider it complete. This prevents race conditions where CAPI
-	// conditions haven't been updated yet to reflect the upgrade in progress.
-	MinUpgradeDuration = 60 * time.Second
 )
 
 // ClusterReconciler reconciles a Cluster object
@@ -221,8 +215,6 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			c.Annotations[ClusterUpgradingAnnotation] = "true"
-			// Record wall clock time when upgrade starts - used to enforce minimum upgrade duration
-			c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
 			// Set timestamp to current available time to prevent it being reset
 			if readyTransition, ok := conditionTimeStampFromAvailableState(c, capi.AvailableCondition); ok {
 				c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
@@ -257,35 +249,6 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		// Only check worker nodes if we're actually upgrading
 		if isCurrentlyUpgrading {
-			// Check minimum upgrade duration to prevent race conditions
-			// CAPI conditions may not be updated immediately when upgrade starts
-			var upgradeStartTime time.Time
-			minDurationPassed := false
-			if startTimeStr, ok := cluster.Annotations[UpgradeStartTimeAnnotation]; ok {
-				if t, err := time.Parse(time.RFC3339, startTimeStr); err == nil {
-					upgradeStartTime = t
-					minDurationPassed = time.Since(upgradeStartTime) >= MinUpgradeDuration
-				}
-			} else {
-				// Annotation missing - this is an upgrade that started before this fix was deployed,
-				// or controller restarted. Use the last known transition time as fallback.
-				// If that's also missing or recent, use a safe default.
-				if !lastKnownTransitionTime.IsZero() {
-					upgradeStartTime = lastKnownTransitionTime
-					minDurationPassed = time.Since(lastKnownTransitionTime) >= MinUpgradeDuration
-				} else {
-					// No timing info available - set the annotation now and wait
-					log.Info("Missing upgrade start time annotation, setting it now")
-					if err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
-						c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
-					}); err != nil {
-						log.Error(err, "Failed to set upgrade start time annotation")
-					}
-					// Don't pass yet, wait for next reconcile
-					minDurationPassed = false
-				}
-			}
-
 			// In v1beta2, we use Cluster-level conditions which are more reliable than checking individual MachinePool conditions
 			// The Cluster aggregates the status of all its components
 			controlPlaneReady := isClusterReady(cluster, capi.AvailableCondition)
@@ -324,8 +287,6 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				"workerMachinesUpToDate", workerMachinesUpToDate,
 				"clusterNotRollingOut", clusterNotRollingOut,
 				"allWorkerNodesReady", allWorkerNodesReady,
-				"minDurationPassed", minDurationPassed,
-				"upgradeStartTime", upgradeStartTime,
 				"timeProgressed", timeProgressed,
 				"versionsMatch", versionsMatch,
 				"lastTransitionTime", lastKnownTransitionTime,
@@ -334,9 +295,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Control plane completed event (only sent once)
 			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane"
 
-			// Control plane is done when it's ready, up-to-date, versions match, AND minimum duration has passed
-			// The minimum duration check prevents race conditions where CAPI hasn't updated conditions yet
-			if controlPlaneReady && controlPlaneUpToDate && versionsMatch && minDurationPassed && !controlPlaneEventSent {
+			// Control plane is done when it's ready, up-to-date, and versions match
+			// We don't require timeProgressed since the cluster may stay available throughout
+			if controlPlaneReady && controlPlaneUpToDate && versionsMatch && !controlPlaneEventSent {
 				log.Info("Control plane upgraded")
 				r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
 					fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
@@ -355,23 +316,20 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// 2. All worker nodes are ready and up-to-date
 			// 3. Cluster is not rolling out (no active upgrade in progress)
 			// 4. Versions match
-			// 5. Minimum upgrade duration has passed (prevents race conditions with CAPI condition updates)
+			// Note: We removed timeProgressed requirement since clusters often stay Available throughout upgrade
 			sendUpgradeEvent := controlPlaneReady &&
 				controlPlaneUpToDate &&
 				allWorkerNodesReady &&
 				clusterNotRollingOut &&
-				versionsMatch &&
-				minDurationPassed
+				versionsMatch
 
 			if sendUpgradeEvent {
-				// Calculate duration from upgrade start time
+				// Calculate duration - if time progressed use that, otherwise use a fallback
 				var duration time.Duration
-				if !upgradeStartTime.IsZero() {
-					duration = time.Since(upgradeStartTime).Round(time.Second)
-				} else if timeProgressed {
+				if timeProgressed {
 					duration = readyTransitionTime.Sub(lastKnownTransitionTime).Round(time.Second)
 				} else {
-					// Fallback to time since last known transition
+					// Use the time since we last updated the timestamp annotation
 					duration = time.Since(lastKnownTransitionTime).Round(time.Second)
 				}
 				log.Info("Cluster upgrade completed successfully",
@@ -399,9 +357,6 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				}
 				if !versionsMatch {
 					reasons = append(reasons, "versions don't match")
-				}
-				if !minDurationPassed {
-					reasons = append(reasons, fmt.Sprintf("minimum duration not passed (need %s)", MinUpgradeDuration))
 				}
 				log.Info("Upgrade still in progress", "waitingFor", reasons)
 			}
@@ -442,10 +397,9 @@ func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, 
 		c.Annotations[LastKnownUpgradeTimestampAnnotation] = transitionTime.Format(time.RFC3339)
 		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
 
-		// When upgrade completes, update the last known version and clean up upgrade annotations
+		// When upgrade completes, update the last known version to current version
 		if !isUpgrading {
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
-			delete(c.Annotations, UpgradeStartTimeAnnotation)
 			delete(c.Annotations, EmittedEventsAnnotation)
 		}
 	})

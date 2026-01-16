@@ -7,14 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-01-16
+
 ### Fixed
 
 - Fixed MachinePools always being reported as "not ready" in CAPI v1beta2 because `Available`/`Ready` conditions are no longer in `status.conditions` (moved to `status.deprecated.v1beta1.conditions`). Now uses `status.phase` for MachinePool readiness checks.
 - Fixed clusters getting stuck in "upgrading" state forever because `timeProgressed` check required the `AvailableCondition.lastTransitionTime` to change, but clusters often stay Available throughout upgrades. Replaced with `RollingOut: False` condition check.
 - Fixed upgrade completion detection by using Cluster-level v1beta2 conditions (`WorkerMachinesReady`, `WorkerMachinesUpToDate`) as primary source instead of checking individual MachinePool conditions.
 - Skip Karpenter-managed MachinePools (annotation: `cluster.x-k8s.io/replicas-managed-by: external-autoscaler`) in individual resource checks since they are externally managed; rely on Cluster-level conditions for these pools.
-- Fixed race condition where upgrade completion events were sent immediately after upgrade started, before CAPI had time to update conditions. Added minimum upgrade duration check (60 seconds) and new `giantswarm.io/upgrade-start-time` annotation to track actual upgrade start time.
-- Handle missing `giantswarm.io/upgrade-start-time` annotation for existing upgrades (started before this fix was deployed or after controller restart) by falling back to `lastKnownTransitionTime` or setting it to current time.
 
 ## [1.0.0] - 2026-01-16
 
@@ -153,7 +153,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.8.0...v1.0.0
 [0.8.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.6.0...v0.7.0
