@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed race condition where upgrade completion events were sent immediately after upgrade started, before CAPI had time to update conditions. Added minimum upgrade duration check (60 seconds) and new `giantswarm.io/upgrade-start-time` annotation to track actual upgrade start time.
+- Handle missing `giantswarm.io/upgrade-start-time` annotation for existing upgrades (started before this fix was deployed or after controller restart) by falling back to `lastKnownTransitionTime` or setting it to current time.
+
 ## [1.0.1] - 2026-01-16
 
 ### Fixed
