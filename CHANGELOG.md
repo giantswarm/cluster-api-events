@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2026-01-16
 
+### Changed
+
+- Switched to using `Available` condition for Cluster status checks instead of deprecated `Ready` condition, aligning with CAPI v1beta2.
+- Updated worker node readiness checks to use v1beta2 `Available` condition with fallback to v1beta1 `Ready` condition for backward compatibility.
+- Simplified MachineDeployment version checking by leveraging v1beta2 `MachinesUpToDate` condition instead of manually traversing Machine ownership chains.
+- **Kept workload cluster node version checking as primary verification method for MachinePools** (including Karpenter-managed nodes), as v1beta1 MachinePools lack `upToDateReplicas` field and Karpenter provisions nodes independently. Falls back to v1beta2 `upToDateReplicas` status field only when workload cluster is inaccessible AND field is available.
+
+### Fixed
+
+- Fixed upgrade event detection with v1beta2 to send "Upgrading" events when release version changes, regardless of `RollingOutCondition` state. The `RollingOutCondition` may not be set immediately or consistently by all infrastructure/control plane providers during version upgrades.
+- Fixed `last-known-cluster-upgrade-version` annotation not being updated when upgrade completes, which would cause incorrect version comparison on subsequent upgrades.
+- Fixed control plane upgrade event firing too early by adding check for `ControlPlaneMachinesUpToDateCondition`. Event now waits for all control plane machines to be upgraded and up-to-date.
+- Fixed worker node readiness check using deprecated v1beta1 `Ready` condition instead of v1beta2 `Available` condition for MachineDeployments and MachinePools, causing false "not ready" detection.
+- Fixed MachinePool version checking to be conservative when workload cluster is inaccessible and `upToDateReplicas` field is not available (v1beta1), preventing false "ready" reports during upgrades.
+
 ## [0.8.0] - 2025-11-20
 
 ### Added

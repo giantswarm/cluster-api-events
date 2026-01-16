@@ -28,8 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
-	capi "sigs.k8s.io/cluster-api/api/v1beta1"
-	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
+	capi "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -184,20 +183,28 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, microerror.Mask(err)
 	}
 
-	controlPlaneUpgrading := isClusterUpgrading(cluster, capi.ReadyCondition)
+	controlPlaneUpgrading := isClusterUpgrading(cluster)
 	releaseVersionDifferent := isClusterReleaseVersionDifferent(cluster)
+	// Check if we're currently marked as upgrading to avoid duplicate events
+	currentlyMarkedAsUpgrading := cluster.Annotations[ClusterUpgradingAnnotation] == "true"
 
-	if controlPlaneUpgrading || workerNodesUpgrading || releaseVersionDifferent {
+	if controlPlaneUpgrading || workerNodesUpgrading || releaseVersionDifferent || currentlyMarkedAsUpgrading {
 		log.Info("Cluster upgrade status check",
 			"controlPlaneUpgrading", controlPlaneUpgrading,
 			"workerNodesUpgrading", workerNodesUpgrading,
 			"releaseVersionDifferent", releaseVersionDifferent,
 			"currentVersion", cluster.Labels[ReleaseVersionLabel],
 			"lastKnownVersion", cluster.Annotations[LastKnownUpgradeVersionAnnotation],
-			"clusterUpgrading", cluster.Annotations[ClusterUpgradingAnnotation])
+			"clusterUpgrading", cluster.Annotations[ClusterUpgradingAnnotation],
+			"currentlyMarkedAsUpgrading", currentlyMarkedAsUpgrading)
 	}
 
-	sendUpgradingEvent := (controlPlaneUpgrading || workerNodesUpgrading) && releaseVersionDifferent
+	// Send upgrading event when:
+	// 1. Release version is different (label changed)
+	// 2. AND we haven't already marked this cluster as upgrading (avoid duplicate events)
+	// Note: We don't require controlPlaneUpgrading or workerNodesUpgrading here because
+	// the RollingOutCondition may not be set immediately or consistently by all providers
+	sendUpgradingEvent := releaseVersionDifferent && !currentlyMarkedAsUpgrading
 	if sendUpgradingEvent {
 		log.Info("Cluster upgrade started",
 			"fromVersion", cluster.Annotations[LastKnownUpgradeVersionAnnotation],
@@ -208,8 +215,8 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			c.Annotations[ClusterUpgradingAnnotation] = "true"
-			// Set timestamp to current ready time to prevent it being reset
-			if readyTransition, ok := conditionTimeStampFromReadyState(c, capi.ReadyCondition); ok {
+			// Set timestamp to current available time to prevent it being reset
+			if readyTransition, ok := conditionTimeStampFromAvailableState(c, capi.AvailableCondition); ok {
 				c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
 			}
 			// Clear emitted events when starting a new upgrade
@@ -220,10 +227,10 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// wait for cluster is ready the first time
-	readyTransition, ok := conditionTimeStampFromReadyState(cluster, capi.ReadyCondition)
+	// wait for cluster is available the first time
+	readyTransition, ok := conditionTimeStampFromAvailableState(cluster, capi.AvailableCondition)
 	if !ok {
-		log.V(1).Info("Cluster control plane not ready yet, waiting...")
+		log.V(1).Info("Cluster control plane not available yet, waiting...")
 		return ctrl.Result{}, nil
 	}
 	readyTransitionTime := readyTransition.UTC()
@@ -248,12 +255,16 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				return ctrl.Result{}, microerror.Mask(err)
 			}
 
-			controlPlaneReady := isClusterReady(cluster, capi.ReadyCondition)
+			controlPlaneReady := isClusterReady(cluster, capi.AvailableCondition)
 			timeProgressed := readyTransitionTime.After(lastKnownTransitionTime)
 			versionsMatch := !isClusterReleaseVersionDifferent(cluster)
 
+			// Check if control plane machines are up-to-date (v1beta2)
+			controlPlaneUpToDate := isClusterReady(cluster, capi.ClusterControlPlaneMachinesUpToDateCondition)
+
 			log.Info("Upgrade in progress - checking completion criteria",
 				"controlPlaneReady", controlPlaneReady,
+				"controlPlaneUpToDate", controlPlaneUpToDate,
 				"allWorkerNodesReady", allWorkerNodesReady,
 				"timeProgressed", timeProgressed,
 				"versionsMatch", versionsMatch,
@@ -263,7 +274,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Control plane completed event (only sent once)
 			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane"
 
-			if controlPlaneReady && timeProgressed && versionsMatch && !controlPlaneEventSent {
+			if controlPlaneReady && controlPlaneUpToDate && timeProgressed && versionsMatch && !controlPlaneEventSent {
 				log.Info("Control plane upgraded")
 				r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
 					fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
@@ -277,8 +288,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				}
 			}
 
-			// Only send upgrade complete event when both control plane AND worker nodes are ready
+			// Only send upgrade complete event when both control plane AND worker nodes are ready and up-to-date
 			sendUpgradeEvent := controlPlaneReady &&
+				controlPlaneUpToDate &&
 				allWorkerNodesReady &&
 				timeProgressed &&
 				versionsMatch
@@ -298,6 +310,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				reasons := []string{}
 				if !controlPlaneReady {
 					reasons = append(reasons, "control plane not ready")
+				}
+				if !controlPlaneUpToDate {
+					reasons = append(reasons, "control plane not up-to-date")
 				}
 				if !allWorkerNodesReady {
 					reasons = append(reasons, "worker nodes not ready")
@@ -347,8 +362,9 @@ func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, 
 		c.Annotations[LastKnownUpgradeTimestampAnnotation] = transitionTime.Format(time.RFC3339)
 		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
 
-		// Clear emitted events when upgrade completes
+		// When upgrade completes, update the last known version to current version
 		if !isUpgrading {
+			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			delete(c.Annotations, EmittedEventsAnnotation)
 		}
 	})
@@ -376,9 +392,9 @@ func (r *ClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 		).
 		Watches(
-			&capiexp.MachinePool{},
+			&capi.MachinePool{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				mp := obj.(*capiexp.MachinePool)
+				mp := obj.(*capi.MachinePool)
 				if clusterName, ok := mp.Labels[capi.ClusterNameLabel]; ok {
 					return []reconcile.Request{
 						{
