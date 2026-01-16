@@ -237,12 +237,28 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	var notReadyMPs []string
 	var versionMismatchMPs []string
 	for _, mp := range machinePools.Items {
-		// In v1beta2, MachinePools use Available condition instead of Ready
-		// Fall back to Ready condition for v1beta1 compatibility
-		ready := isClusterReady(&mp, capi.AvailableCondition)
-		if !ready {
-			ready = isClusterReady(&mp, capi.ReadyCondition)
+		// Skip Karpenter-managed MachinePools - they are externally managed and their state
+		// is not reliably reflected in CAPI status. We rely on Cluster-level conditions
+		// (WorkerMachinesReady, WorkerMachinesUpToDate) for these pools instead.
+		if mp.Annotations["cluster.x-k8s.io/replicas-managed-by"] == "external-autoscaler" {
+			log := log.FromContext(ctx)
+			log.V(1).Info("Skipping Karpenter-managed MachinePool in individual check",
+				"machinePool", mp.Name,
+				"reason", "externally managed, relying on Cluster-level conditions")
+			continue
 		}
+
+		// In v1beta2, MachinePools don't have Available/Ready conditions in status.conditions
+		// (they only have Paused). The old conditions are in status.deprecated.v1beta1.conditions.
+		// Instead, we check status fields directly which are reliable:
+		// - status.replicas, status.readyReplicas, status.availableReplicas
+		// - status.phase indicates the overall MachinePool state
+		phase := capi.MachinePoolPhase(mp.Status.Phase)
+		ready := phase == capi.MachinePoolPhaseRunning ||
+			phase == capi.MachinePoolPhaseScaling ||
+			phase == capi.MachinePoolPhaseScalingUp ||
+			phase == capi.MachinePoolPhaseScalingDown
+
 		// Check version match - MachinePool label should match cluster version
 		// Note: mp.Spec.Template.Spec.Version uses Kubernetes version format (v1.31.9)
 		// while labels use release version format (31.0.0), so we can't compare them directly

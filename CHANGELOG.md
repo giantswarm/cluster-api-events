@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed MachinePools always being reported as "not ready" in CAPI v1beta2 because `Available`/`Ready` conditions are no longer in `status.conditions` (moved to `status.deprecated.v1beta1.conditions`). Now uses `status.phase` for MachinePool readiness checks.
+- Fixed clusters getting stuck in "upgrading" state forever because `timeProgressed` check required the `AvailableCondition.lastTransitionTime` to change, but clusters often stay Available throughout upgrades. Replaced with `RollingOut: False` condition check.
+- Fixed upgrade completion detection by using Cluster-level v1beta2 conditions (`WorkerMachinesReady`, `WorkerMachinesUpToDate`) as primary source instead of checking individual MachinePool conditions.
+- Skip Karpenter-managed MachinePools (annotation: `cluster.x-k8s.io/replicas-managed-by: external-autoscaler`) in individual resource checks since they are externally managed; rely on Cluster-level conditions for these pools.
+
 ## [1.0.0] - 2026-01-16
 
 ### Changed

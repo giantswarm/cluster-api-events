@@ -249,22 +249,43 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		// Only check worker nodes if we're actually upgrading
 		if isCurrentlyUpgrading {
-			allWorkerNodesReady, err := areAllWorkerNodesReady(ctx, r.Client, cluster)
-			if err != nil {
-				log.Error(err, "Failed to check worker node ready status")
-				return ctrl.Result{}, microerror.Mask(err)
-			}
-
+			// In v1beta2, we use Cluster-level conditions which are more reliable than checking individual MachinePool conditions
+			// The Cluster aggregates the status of all its components
 			controlPlaneReady := isClusterReady(cluster, capi.AvailableCondition)
-			timeProgressed := readyTransitionTime.After(lastKnownTransitionTime)
 			versionsMatch := !isClusterReleaseVersionDifferent(cluster)
 
 			// Check if control plane machines are up-to-date (v1beta2)
 			controlPlaneUpToDate := isClusterReady(cluster, capi.ClusterControlPlaneMachinesUpToDateCondition)
 
+			// Check v1beta2 Cluster-level worker conditions first (more reliable)
+			// These conditions aggregate the status of all MachinePools and MachineDeployments
+			workerMachinesReady := isClusterReady(cluster, capi.ClusterWorkerMachinesReadyCondition)
+			workerMachinesUpToDate := isClusterReady(cluster, capi.ClusterWorkerMachinesUpToDateCondition)
+			clusterNotRollingOut := !isClusterUpgrading(cluster) // RollingOut condition is False
+
+			// Fall back to checking individual MachinePools/MachineDeployments if cluster conditions are not available
+			// This can happen on older CAPI versions or during transition
+			allWorkerNodesReady := workerMachinesReady && workerMachinesUpToDate
+			if !workerMachinesReady && !workerMachinesUpToDate {
+				// Cluster conditions not set, check individual resources
+				var err error
+				allWorkerNodesReady, err = areAllWorkerNodesReady(ctx, r.Client, cluster)
+				if err != nil {
+					log.Error(err, "Failed to check worker node ready status")
+					return ctrl.Result{}, microerror.Mask(err)
+				}
+			}
+
+			// Time progressed check is only used for duration calculation now
+			// We no longer require it for completion since clusters may stay Available throughout upgrade
+			timeProgressed := readyTransitionTime.After(lastKnownTransitionTime)
+
 			log.Info("Upgrade in progress - checking completion criteria",
 				"controlPlaneReady", controlPlaneReady,
 				"controlPlaneUpToDate", controlPlaneUpToDate,
+				"workerMachinesReady", workerMachinesReady,
+				"workerMachinesUpToDate", workerMachinesUpToDate,
+				"clusterNotRollingOut", clusterNotRollingOut,
 				"allWorkerNodesReady", allWorkerNodesReady,
 				"timeProgressed", timeProgressed,
 				"versionsMatch", versionsMatch,
@@ -274,7 +295,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Control plane completed event (only sent once)
 			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane"
 
-			if controlPlaneReady && controlPlaneUpToDate && timeProgressed && versionsMatch && !controlPlaneEventSent {
+			// Control plane is done when it's ready, up-to-date, and versions match
+			// We don't require timeProgressed since the cluster may stay available throughout
+			if controlPlaneReady && controlPlaneUpToDate && versionsMatch && !controlPlaneEventSent {
 				log.Info("Control plane upgraded")
 				r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
 					fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
@@ -288,15 +311,27 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				}
 			}
 
-			// Only send upgrade complete event when both control plane AND worker nodes are ready and up-to-date
+			// Upgrade is complete when:
+			// 1. Control plane is ready and up-to-date
+			// 2. All worker nodes are ready and up-to-date
+			// 3. Cluster is not rolling out (no active upgrade in progress)
+			// 4. Versions match
+			// Note: We removed timeProgressed requirement since clusters often stay Available throughout upgrade
 			sendUpgradeEvent := controlPlaneReady &&
 				controlPlaneUpToDate &&
 				allWorkerNodesReady &&
-				timeProgressed &&
+				clusterNotRollingOut &&
 				versionsMatch
 
 			if sendUpgradeEvent {
-				duration := readyTransitionTime.Sub(lastKnownTransitionTime).Round(time.Second)
+				// Calculate duration - if time progressed use that, otherwise use a fallback
+				var duration time.Duration
+				if timeProgressed {
+					duration = readyTransitionTime.Sub(lastKnownTransitionTime).Round(time.Second)
+				} else {
+					// Use the time since we last updated the timestamp annotation
+					duration = time.Since(lastKnownTransitionTime).Round(time.Second)
+				}
 				log.Info("Cluster upgrade completed successfully",
 					"version", cluster.Labels[ReleaseVersionLabel],
 					"duration", duration)
@@ -317,8 +352,8 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				if !allWorkerNodesReady {
 					reasons = append(reasons, "worker nodes not ready")
 				}
-				if !timeProgressed {
-					reasons = append(reasons, "time not progressed")
+				if !clusterNotRollingOut {
+					reasons = append(reasons, "cluster still rolling out")
 				}
 				if !versionsMatch {
 					reasons = append(reasons, "versions don't match")
