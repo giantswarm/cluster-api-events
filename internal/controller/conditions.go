@@ -281,16 +281,11 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	var notReadyMPs []string
 	var versionMismatchMPs []string
 	for _, mp := range machinePools.Items {
-		// Skip Karpenter-managed MachinePools - they are externally managed and their state
-		// is not reliably reflected in CAPI status. We rely on Cluster-level conditions
-		// (WorkerMachinesReady, WorkerMachinesUpToDate) for these pools instead.
-		if mp.Annotations["cluster.x-k8s.io/replicas-managed-by"] == "external-autoscaler" {
-			log := log.FromContext(ctx)
-			log.V(1).Info("Skipping Karpenter-managed MachinePool in individual check",
-				"machinePool", mp.Name,
-				"reason", "externally managed, relying on Cluster-level conditions")
-			continue
-		}
+		logger := log.FromContext(ctx)
+
+		// Check if this MachinePool is managed by an external autoscaler (Cluster Autoscaler, Karpenter, etc.)
+		// See: https://cluster-api.sigs.k8s.io/developer/architecture/controllers/machine-pool#primitives
+		isExternallyManaged := mp.Annotations["cluster.x-k8s.io/replicas-managed-by"] == "external-autoscaler"
 
 		// In v1beta2, MachinePools don't have Available/Ready conditions in status.conditions
 		// (they only have Paused). The old conditions are in status.deprecated.v1beta1.conditions.
@@ -366,13 +361,29 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 				}())
 		}
 
-		rolloutComplete := basicRolloutComplete && allNodesCorrectVersion
+		// For externally-managed MachinePools (Cluster Autoscaler, Karpenter, etc.),
+		// ONLY use workload cluster check. CAPI status (replicas, phase) is unreliable
+		// for pools managed by external autoscalers.
+		// For regular MachinePools, use both CAPI status AND workload cluster check.
+		var rolloutComplete bool
+		if isExternallyManaged {
+			// External autoscaler: ONLY trust actual workload cluster node versions
+			rolloutComplete = allNodesCorrectVersion
+			logger.Info("Externally-managed MachinePool - using workload cluster check only",
+				"machinePool", mp.Name,
+				"allNodesCorrectVersion", allNodesCorrectVersion,
+				"nodeVersionCheckPerformed", nodeVersionCheckPerformed,
+				"nodesWithWrongVersion", nodesWithWrongVersion)
+		} else {
+			// Regular: use both CAPI status AND workload cluster check
+			rolloutComplete = basicRolloutComplete && allNodesCorrectVersion
+		}
 
-		log := log.FromContext(ctx)
-		logLevel := log.V(1)
+		logLevel := logger.V(1)
 
 		logFields := []interface{}{
 			"name", mp.Name,
+			"isExternallyManaged", isExternallyManaged,
 			"ready", ready,
 			"allNodesCorrectVersion", allNodesCorrectVersion,
 			"nodeVersionCheckPerformed", nodeVersionCheckPerformed,
@@ -414,7 +425,16 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 
 		logLevel.Info("Checking MachinePool status", logFields...)
 
-		if !ready || !rolloutComplete {
+		// For externally-managed pools: only check workload cluster result (skip CAPI ready check)
+		// For regular pools: check both ready and rolloutComplete
+		var isNotReady bool
+		if isExternallyManaged {
+			isNotReady = !rolloutComplete
+		} else {
+			isNotReady = !ready || !rolloutComplete
+		}
+
+		if isNotReady {
 			notReadyMPs = append(notReadyMPs, mp.Name)
 		}
 
