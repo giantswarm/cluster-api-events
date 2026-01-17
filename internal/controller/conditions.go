@@ -88,9 +88,12 @@ func getWorkloadClusterClient(ctx context.Context, c client.Client, cluster *cap
 
 // checkMachinePoolNodeVersions connects to workload cluster and checks node versions for a MachinePool
 func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capi.MachinePool, expectedVersion string) (bool, []string, error) {
+	logger := log.FromContext(ctx)
+	labelSelector := fmt.Sprintf("giantswarm.io/machine-pool=%s", mp.Name)
+
 	// List nodes with minimal fields to reduce memory usage
 	nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("giantswarm.io/machine-pool=%s", mp.Name),
+		LabelSelector: labelSelector,
 		// Limit fields to only what we need to reduce memory usage
 		FieldSelector: "spec.unschedulable!=true",
 		// Limit the number of nodes returned to prevent memory issues
@@ -100,36 +103,77 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 		return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s: %w", mp.Name, err)
 	}
 
+	// CRITICAL: If no nodes found, be conservative and return false
+	// This can happen due to:
+	// - Nodes not yet provisioned
+	// - Label selector mismatch
+	// - RBAC issues returning empty list instead of error
+	if len(nodes.Items) == 0 {
+		logger.Info("No nodes found for MachinePool in workload cluster, marking as not ready",
+			"machinePool", mp.Name,
+			"labelSelector", labelSelector,
+			"expectedVersion", expectedVersion)
+		return false, []string{"no nodes found with label selector"}, nil
+	}
+
+	logger.V(1).Info("Checking node versions for MachinePool",
+		"machinePool", mp.Name,
+		"nodeCount", len(nodes.Items),
+		"expectedVersion", expectedVersion,
+		"labelSelector", labelSelector)
+
 	var nodesWithWrongVersion []string
 	allCorrectVersion := true
+	checkedNodeCount := 0
 
 	for _, node := range nodes.Items {
 		// Skip nodes being drained/cordoned (unschedulable) - should be filtered by FieldSelector but double-check
 		if node.Spec.Unschedulable {
-			log := log.FromContext(ctx)
-			log.V(1).Info("Skipping unschedulable node in MachinePool version check",
+			logger.V(1).Info("Skipping unschedulable node in MachinePool version check",
 				"machinePool", mp.Name,
 				"node", node.Name,
 				"nodeVersion", node.Status.NodeInfo.KubeletVersion)
 			continue
 		}
 
+		checkedNodeCount++
+		nodeVersion := node.Status.NodeInfo.KubeletVersion
+
 		// Check kubelet version
-		if node.Status.NodeInfo.KubeletVersion != expectedVersion {
+		if nodeVersion != expectedVersion {
 			nodesWithWrongVersion = append(nodesWithWrongVersion,
-				fmt.Sprintf("%s(%s!=%s)", node.Name, node.Status.NodeInfo.KubeletVersion, expectedVersion))
+				fmt.Sprintf("%s(%s!=%s)", node.Name, nodeVersion, expectedVersion))
 			allCorrectVersion = false
+
+			logger.Info("Node has wrong version",
+				"machinePool", mp.Name,
+				"node", node.Name,
+				"nodeVersion", nodeVersion,
+				"expectedVersion", expectedVersion)
 
 			// Limit the number of wrong version nodes we track to prevent memory bloat
 			if len(nodesWithWrongVersion) >= 10 {
-				log := log.FromContext(ctx)
-				log.V(1).Info("Truncating wrong version nodes list to prevent memory usage",
+				logger.V(1).Info("Truncating wrong version nodes list to prevent memory usage",
 					"machinePool", mp.Name,
 					"totalWrongVersionNodes", "10+")
 				break
 			}
 		}
 	}
+
+	// If all nodes were skipped (unschedulable), be conservative
+	if checkedNodeCount == 0 {
+		logger.Info("All nodes for MachinePool are unschedulable, marking as not ready",
+			"machinePool", mp.Name,
+			"totalNodes", len(nodes.Items))
+		return false, []string{"all nodes unschedulable"}, nil
+	}
+
+	logger.V(1).Info("MachinePool node version check complete",
+		"machinePool", mp.Name,
+		"checkedNodes", checkedNodeCount,
+		"allCorrectVersion", allCorrectVersion,
+		"nodesWithWrongVersion", nodesWithWrongVersion)
 
 	return allCorrectVersion, nodesWithWrongVersion, nil
 }
@@ -303,22 +347,23 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			}
 		}
 
-		// Only use upToDateReplicas as fallback if:
-		// 1. Workload check failed, AND
-		// 2. The field actually exists (v1beta2), AND
-		// 3. It matches desired replicas
+		// If workload cluster check was not performed (client unavailable or error),
+		// we CANNOT trust upToDateReplicas because it reports based on ASG/Launch Template
+		// state, not actual node versions. Be conservative and mark as not ready.
 		if !nodeVersionCheckPerformed {
-			if mp.Status.UpToDateReplicas != nil {
-				allNodesCorrectVersion = desiredReplicas == *mp.Status.UpToDateReplicas
-			} else {
-				// v1beta1 or field not set - we cannot determine version correctness
-				// Mark as not ready to be conservative
-				allNodesCorrectVersion = false
-				log := log.FromContext(ctx)
-				log.Info("Cannot verify MachinePool node versions - workload cluster inaccessible and upToDateReplicas not available",
-					"machinePool", mp.Name,
-					"apiVersion", "likely v1beta1")
-			}
+			// CRITICAL: Don't trust upToDateReplicas - it has the same problem as CAPI conditions!
+			// The ASG can report "up-to-date" before nodes are actually replaced.
+			allNodesCorrectVersion = false
+			log := log.FromContext(ctx)
+			log.Info("Cannot verify MachinePool node versions - workload cluster inaccessible, marking as not ready",
+				"machinePool", mp.Name,
+				"workloadClientError", workloadClientErr,
+				"upToDateReplicas", func() string {
+					if mp.Status.UpToDateReplicas != nil {
+						return fmt.Sprintf("%d", *mp.Status.UpToDateReplicas)
+					}
+					return "nil"
+				}())
 		}
 
 		rolloutComplete := basicRolloutComplete && allNodesCorrectVersion
