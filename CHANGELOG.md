@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Critical**: Fixed premature upgrade completion events for MachinePools. CAPI conditions (`WorkerMachinesUpToDate`) can report `True` based on ASG/Launch Template state while actual nodes in the workload cluster are still being replaced. Now ALWAYS verifies actual workload cluster node versions instead of trusting CAPI conditions.
+
 ## [1.0.3] - 2026-01-17
 
 ### Fixed
