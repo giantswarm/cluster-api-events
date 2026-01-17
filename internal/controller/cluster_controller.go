@@ -218,26 +218,37 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	hasValidPreviousVersion := previousVersion != "" && previousVersion != cluster.Labels[ReleaseVersionLabel]
 	sendUpgradingEvent := releaseVersionDifferent && !currentlyMarkedAsUpgrading && hasValidPreviousVersion
 	if sendUpgradingEvent {
-		log.Info("Cluster upgrade started",
-			"fromVersion", previousVersion,
-			"toVersion", cluster.Labels[ReleaseVersionLabel])
-		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("from release %s to %s", previousVersion, cluster.Labels[ReleaseVersionLabel]))
-
-		// Update both version and timestamp when starting upgrade
-		err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
-			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
-			c.Annotations[ClusterUpgradingAnnotation] = "true"
-			// Record wall clock time when upgrade starts - used to enforce minimum upgrade duration
-			c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
-			// Set timestamp to current available time to prevent it being reset
-			if readyTransition, ok := conditionTimeStampFromAvailableState(c, capi.AvailableCondition); ok {
-				c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
-			}
-			// Clear emitted events when starting a new upgrade
-			delete(c.Annotations, EmittedEventsAnnotation)
-		})
-		if err != nil {
+		// Double-check by refetching the cluster to prevent race conditions
+		// where multiple reconciles could send duplicate "Upgrading" events
+		latestCluster := &capi.Cluster{}
+		if err := r.Get(ctx, req.NamespacedName, latestCluster); err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
+		}
+		// If another reconcile already marked it as upgrading, skip sending the event
+		if latestCluster.Annotations[ClusterUpgradingAnnotation] == "true" {
+			log.Info("Upgrade already started by another reconcile, skipping event")
+		} else {
+			log.Info("Cluster upgrade started",
+				"fromVersion", previousVersion,
+				"toVersion", cluster.Labels[ReleaseVersionLabel])
+			r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("from release %s to %s", previousVersion, cluster.Labels[ReleaseVersionLabel]))
+
+			// Update both version and timestamp when starting upgrade
+			err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+				c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
+				c.Annotations[ClusterUpgradingAnnotation] = "true"
+				// Record wall clock time when upgrade starts - used to enforce minimum upgrade duration
+				c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+				// Set timestamp to current available time to prevent it being reset
+				if readyTransition, ok := conditionTimeStampFromAvailableState(c, capi.AvailableCondition); ok {
+					c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
+				}
+				// Clear emitted events when starting a new upgrade
+				delete(c.Annotations, EmittedEventsAnnotation)
+			})
+			if err != nil {
+				return ctrl.Result{}, microerror.Mask(err)
+			}
 		}
 	}
 
