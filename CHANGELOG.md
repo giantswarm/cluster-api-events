@@ -7,11 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed new cluster creation triggering false "Upgrading" events with empty "from version". Now only sends upgrade events when there is a valid previous version.
+- Fixed duplicate completion events being sent by concurrent reconciles. Now tracks "Upgraded" event in annotations to prevent race conditions.
+- Fixed potential duplicate "Upgrading" events from concurrent reconciles by refetching cluster state before sending event.
+
 ## [1.0.2] - 2026-01-16
 
 ### Fixed
 
-- Fixed race condition where upgrade completion events were sent immediately after upgrade started, before CAPI had time to update conditions. Added minimum upgrade duration check (60 seconds) and new `giantswarm.io/upgrade-start-time` annotation to track actual upgrade start time.
+- Fixed race condition where upgrade completion events were sent immediately after upgrade started, before CAPI had time to update conditions. Added minimum upgrade duration check (30 seconds) and new `giantswarm.io/upgrade-start-time` annotation to track actual upgrade start time.
 - Handle missing `giantswarm.io/upgrade-start-time` annotation for existing upgrades (started before this fix was deployed or after controller restart) by falling back to `lastKnownTransitionTime` or setting it to current time.
 
 ## [1.0.1] - 2026-01-16
