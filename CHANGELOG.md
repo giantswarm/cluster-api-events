@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-01-17
+
 ### Fixed
 
 - **Critical**: Fixed externally-managed MachinePools (Cluster Autoscaler, Karpenter, etc.) being skipped entirely from workload cluster node version checks. Previously, MachinePools with `cluster.x-k8s.io/replicas-managed-by: external-autoscaler` annotation were completely skipped, causing premature upgrade completion events. Now performs workload cluster node version verification for ALL MachinePools (including externally-managed ones), while skipping only the unreliable CAPI status checks for externally-managed pools.
@@ -186,7 +188,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.2...v1.0.3
