@@ -311,23 +311,20 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Check if control plane machines are up-to-date (v1beta2)
 			controlPlaneUpToDate := isClusterReady(cluster, capi.ClusterControlPlaneMachinesUpToDateCondition)
 
-			// Check v1beta2 Cluster-level worker conditions first (more reliable)
+			// Check v1beta2 Cluster-level worker conditions (used for logging, but NOT trusted for MachinePools)
 			// These conditions aggregate the status of all MachinePools and MachineDeployments
 			workerMachinesReady := isClusterReady(cluster, capi.ClusterWorkerMachinesReadyCondition)
 			workerMachinesUpToDate := isClusterReady(cluster, capi.ClusterWorkerMachinesUpToDateCondition)
 			clusterNotRollingOut := !isClusterUpgrading(cluster) // RollingOut condition is False
 
-			// Fall back to checking individual MachinePools/MachineDeployments if cluster conditions are not available
-			// This can happen on older CAPI versions or during transition
-			allWorkerNodesReady := workerMachinesReady && workerMachinesUpToDate
-			if !workerMachinesReady && !workerMachinesUpToDate {
-				// Cluster conditions not set, check individual resources
-				var err error
-				allWorkerNodesReady, err = areAllWorkerNodesReady(ctx, r.Client, cluster)
-				if err != nil {
-					log.Error(err, "Failed to check worker node ready status")
-					return ctrl.Result{}, microerror.Mask(err)
-				}
+			// ALWAYS verify actual workload cluster node versions for MachinePools
+			// CAPI conditions can report "up-to-date" based on ASG/Launch Template state,
+			// but the actual nodes in the cluster may not be replaced yet.
+			// This is critical for accurate upgrade completion detection.
+			allWorkerNodesReady, err := areAllWorkerNodesReady(ctx, r.Client, cluster)
+			if err != nil {
+				log.Error(err, "Failed to check worker node ready status")
+				return ctrl.Result{}, microerror.Mask(err)
 			}
 
 			// Time progressed check is only used for duration calculation now
