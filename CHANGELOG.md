@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Critical**: Fixed Karpenter-managed MachinePools being skipped entirely from workload cluster node version checks. Previously, MachinePools with `cluster.x-k8s.io/replicas-managed-by: external-autoscaler` annotation were completely skipped, causing premature upgrade completion events. Now performs workload cluster node version verification for ALL MachinePools (including Karpenter-managed ones), while skipping only the unreliable CAPI status checks for Karpenter pools.
+- **Critical**: Fixed externally-managed MachinePools (Cluster Autoscaler, Karpenter, etc.) being skipped entirely from workload cluster node version checks. Previously, MachinePools with `cluster.x-k8s.io/replicas-managed-by: external-autoscaler` annotation were completely skipped, causing premature upgrade completion events. Now performs workload cluster node version verification for ALL MachinePools (including externally-managed ones), while skipping only the unreliable CAPI status checks for externally-managed pools.
 
 ## [1.0.5] - 2026-01-17
 
