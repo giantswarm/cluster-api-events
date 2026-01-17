@@ -303,22 +303,23 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			}
 		}
 
-		// Only use upToDateReplicas as fallback if:
-		// 1. Workload check failed, AND
-		// 2. The field actually exists (v1beta2), AND
-		// 3. It matches desired replicas
+		// If workload cluster check was not performed (client unavailable or error),
+		// we CANNOT trust upToDateReplicas because it reports based on ASG/Launch Template
+		// state, not actual node versions. Be conservative and mark as not ready.
 		if !nodeVersionCheckPerformed {
-			if mp.Status.UpToDateReplicas != nil {
-				allNodesCorrectVersion = desiredReplicas == *mp.Status.UpToDateReplicas
-			} else {
-				// v1beta1 or field not set - we cannot determine version correctness
-				// Mark as not ready to be conservative
-				allNodesCorrectVersion = false
-				log := log.FromContext(ctx)
-				log.Info("Cannot verify MachinePool node versions - workload cluster inaccessible and upToDateReplicas not available",
-					"machinePool", mp.Name,
-					"apiVersion", "likely v1beta1")
-			}
+			// CRITICAL: Don't trust upToDateReplicas - it has the same problem as CAPI conditions!
+			// The ASG can report "up-to-date" before nodes are actually replaced.
+			allNodesCorrectVersion = false
+			log := log.FromContext(ctx)
+			log.Info("Cannot verify MachinePool node versions - workload cluster inaccessible, marking as not ready",
+				"machinePool", mp.Name,
+				"workloadClientError", workloadClientErr,
+				"upToDateReplicas", func() string {
+					if mp.Status.UpToDateReplicas != nil {
+						return fmt.Sprintf("%d", *mp.Status.UpToDateReplicas)
+					}
+					return "nil"
+				}())
 		}
 
 		rolloutComplete := basicRolloutComplete && allNodesCorrectVersion
