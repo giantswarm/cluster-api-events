@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Changed upgrade event types to indicate whether nodes will be replaced based on semver comparison:
+  - `UpgradingWithNodeRoll` for minor/major upgrades (nodes will be replaced)
+  - `UpgradingWithoutNodeRoll` for patch upgrades (nodes unlikely to be replaced)
+- Updated copyright year to 2026.
+
 ## [1.0.7] - 2026-01-20
 
 ### Fixed
