@@ -346,21 +346,33 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				"currentReadyTime", readyTransitionTime)
 
 			// Control plane completed event (only sent once)
-			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane"
+			// Use atomic claim-and-emit pattern to prevent duplicate events from concurrent reconciles
+			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane" ||
+				cluster.Annotations[EmittedEventsAnnotation] == "Upgraded"
 
 			// Control plane is done when it's ready, up-to-date, versions match, AND minimum duration has passed
 			// The minimum duration check prevents race conditions where CAPI hasn't updated conditions yet
 			if controlPlaneReady && controlPlaneUpToDate && versionsMatch && minDurationPassed && !controlPlaneEventSent {
-				log.Info("Control plane upgraded")
-				r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
-					fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
-
-				// Mark event as sent
-				err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+				// Try to atomically claim the event by updating annotation first
+				// This prevents race conditions where multiple reconciles send duplicate events
+				eventClaimed := false
+				err := updateClusterAnnotationsWithCheck(r.Client, cluster, EmittedEventsAnnotation, "UpgradedControlPlane", func(c *capi.Cluster, currentValue string) bool {
+					// Check if already claimed by another reconcile
+					if currentValue == "UpgradedControlPlane" || currentValue == "Upgraded" {
+						return false // Don't claim, already sent
+					}
 					c.Annotations[EmittedEventsAnnotation] = "UpgradedControlPlane"
-				})
+					return true // Claimed
+				}, &eventClaimed)
 				if err != nil {
 					log.Error(err, "Failed to update control plane event annotation")
+				} else if eventClaimed {
+					// Only send event after successfully claiming the annotation
+					log.Info("Control plane upgraded")
+					r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
+						fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
+				} else {
+					log.Info("Control plane event already sent by another reconcile, skipping")
 				}
 			}
 
@@ -391,18 +403,28 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					// Fallback to time since last known transition
 					duration = time.Since(lastKnownTransitionTime).Round(time.Second)
 				}
-				log.Info("Cluster upgrade completed successfully",
-					"version", cluster.Labels[ReleaseVersionLabel],
-					"duration", duration)
-				r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("to release %s in %s", cluster.Labels[ReleaseVersionLabel], duration))
 
-				// Mark completion event as sent BEFORE updating the transition time
-				// This prevents race conditions with concurrent reconciles
-				err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+				// Try to atomically claim the upgrade event by updating annotation first
+				// This prevents race conditions where multiple reconciles send duplicate events
+				eventClaimed := false
+				err := updateClusterAnnotationsWithCheck(r.Client, cluster, EmittedEventsAnnotation, "Upgraded", func(c *capi.Cluster, currentValue string) bool {
+					// Check if already claimed by another reconcile
+					if currentValue == "Upgraded" {
+						return false // Don't claim, already sent
+					}
 					c.Annotations[EmittedEventsAnnotation] = "Upgraded"
-				})
+					return true // Claimed
+				}, &eventClaimed)
 				if err != nil {
 					log.Error(err, "Failed to mark upgrade event as sent")
+				} else if eventClaimed {
+					// Only send event after successfully claiming the annotation
+					log.Info("Cluster upgrade completed successfully",
+						"version", cluster.Labels[ReleaseVersionLabel],
+						"duration", duration)
+					r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("to release %s in %s", cluster.Labels[ReleaseVersionLabel], duration))
+				} else {
+					log.Info("Upgrade event already sent by another reconcile, skipping")
 				}
 
 				err = updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
@@ -471,16 +493,65 @@ func updateClusterAnnotations(client client.Client, cluster *capi.Cluster, modif
 	})
 }
 
+// updateClusterAnnotationsWithCheck is similar to updateClusterAnnotations but allows
+// checking the current annotation value before deciding whether to modify it.
+// This enables atomic "claim-and-emit" patterns for events where we need to prevent
+// duplicate event emission from concurrent reconciles.
+//
+// The checkAndModify function receives the cluster and the current value of the specified
+// annotation key. It should return true if the modification was made (event should be emitted),
+// or false if the annotation was already set by another reconcile (skip event emission).
+// The claimed result is written to the claimed pointer after successful update.
+func updateClusterAnnotationsWithCheck(c client.Client, cluster *capi.Cluster, annotationKey string, expectedValue string, checkAndModify func(*capi.Cluster, string) bool, claimed *bool) error {
+	*claimed = false
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestCluster := &capi.Cluster{}
+		if err := c.Get(context.Background(), types.NamespacedName{
+			Name:      cluster.Name,
+			Namespace: cluster.Namespace,
+		}, latestCluster); err != nil {
+			return err
+		}
+
+		if latestCluster.Annotations == nil {
+			latestCluster.Annotations = make(map[string]string)
+		}
+
+		currentValue := latestCluster.Annotations[annotationKey]
+		shouldModify := checkAndModify(latestCluster, currentValue)
+
+		if !shouldModify {
+			// Another reconcile already claimed this, no need to update
+			*claimed = false
+			return nil
+		}
+
+		if err := c.Update(context.Background(), latestCluster); err != nil {
+			// On conflict, reset claimed and retry
+			*claimed = false
+			return err
+		}
+
+		// Successfully updated, we claimed it
+		*claimed = true
+		return nil
+	})
+}
+
 func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, transitionTime time.Time, isUpgrading bool) error {
 	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
 		c.Annotations[LastKnownUpgradeTimestampAnnotation] = transitionTime.Format(time.RFC3339)
 		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
 
-		// When upgrade completes, update the last known version and clean up upgrade annotations
+		// When upgrade completes, update the last known version and clean up timing annotations
+		// NOTE: We intentionally do NOT delete EmittedEventsAnnotation here!
+		// Deleting it would allow concurrent reconciles still in the upgrade-checking block
+		// to re-send events (especially UpgradedControlPlane). The annotation is cleared
+		// at the START of a new upgrade instead (see line ~247 where we delete it).
 		if !isUpgrading {
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			delete(c.Annotations, UpgradeStartTimeAnnotation)
-			delete(c.Annotations, EmittedEventsAnnotation)
+			// EmittedEventsAnnotation is cleared at the start of the NEXT upgrade, not here
 		}
 	})
 }

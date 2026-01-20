@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed duplicate "Control plane upgrade completed" events being sent at the same time as upgrade completion. The `EmittedEventsAnnotation` was being deleted when the upgrade completed, allowing concurrent reconciles to re-send the control plane event.
+- Added atomic claim-and-emit pattern for event emission to prevent race conditions where multiple concurrent reconciles could send the same event before either updates the annotation.
+
 ## [1.0.6] - 2026-01-17
 
 ### Fixed
