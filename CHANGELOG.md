@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-01-21
+
 ### Fixed
 
 - Fixed missing notification when upgrade target changes mid-upgrade. Previously, if the release version label was changed while an upgrade was already in progress (e.g., changing target from 32.2.0 to 33.1.3 while upgrading from 31.0.0), no notification would be sent. Now emits a new "Upgrading" event with "(upgrade target updated)" in the message, and resets tracking so control plane completion is re-sent for the new target.
@@ -206,7 +208,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.7...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.4...v1.0.5
