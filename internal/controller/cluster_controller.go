@@ -219,7 +219,55 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	previousVersion := cluster.Annotations[LastKnownUpgradeVersionAnnotation]
 	hasValidPreviousVersion := previousVersion != "" && previousVersion != cluster.Labels[ReleaseVersionLabel]
 	sendUpgradingEvent := releaseVersionDifferent && !currentlyMarkedAsUpgrading && hasValidPreviousVersion
-	if sendUpgradingEvent {
+
+	// Detect target change mid-upgrade: the release version label was changed while
+	// an upgrade was already in progress. In this case, we should emit a new event
+	// to notify about the updated target version.
+	targetChangedMidUpgrade := releaseVersionDifferent && currentlyMarkedAsUpgrading && hasValidPreviousVersion
+
+	if targetChangedMidUpgrade {
+		// Target version changed while upgrade was in progress
+		// Emit a new event with the updated version transition
+		toVersion := cluster.Labels[ReleaseVersionLabel]
+		upgradeType := determineUpgradeType(previousVersion, toVersion)
+
+		var eventReason string
+		switch upgradeType {
+		case UpgradeTypePatch:
+			eventReason = "UpgradingWithoutNodeRoll"
+		case UpgradeTypeMinor, UpgradeTypeMajor:
+			eventReason = "UpgradingWithNodeRoll"
+		default:
+			eventReason = "UpgradingWithNodeRoll"
+		}
+
+		log.Info("Cluster upgrade target changed mid-upgrade",
+			"fromVersion", previousVersion,
+			"toVersion", toVersion,
+			"upgradeType", upgradeType,
+			"eventReason", eventReason)
+
+		// Message indicates this is a target change, not a new upgrade
+		eventMessage := fmt.Sprintf("from release %s to %s (upgrade target updated)", previousVersion, toVersion)
+		r.Recorder.Event(cluster, "Normal", eventReason, eventMessage)
+
+		// Update the annotation to track the new target version
+		// Keep ClusterUpgradingAnnotation as "true" since upgrade is still in progress
+		err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
+			// Reset upgrade start time since we're effectively tracking a new upgrade target
+			c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+			// Clear emitted events since the target changed - control plane may need to upgrade further
+			delete(c.Annotations, EmittedEventsAnnotation)
+		})
+		if err != nil {
+			return ctrl.Result{}, microerror.Mask(err)
+		}
+		// Refetch cluster after update
+		if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
+			return ctrl.Result{}, microerror.Mask(err)
+		}
+	} else if sendUpgradingEvent {
 		// Double-check by refetching the cluster to prevent race conditions
 		// where multiple reconciles could send duplicate "Upgrading" events
 		latestCluster := &capi.Cluster{}
