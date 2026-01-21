@@ -1,5 +1,5 @@
 /*
-Copyright 2024.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,8 +20,10 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/blang/semver/v4"
 	"github.com/giantswarm/microerror"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -228,10 +230,32 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if latestCluster.Annotations[ClusterUpgradingAnnotation] == "true" {
 			log.Info("Upgrade already started by another reconcile, skipping event")
 		} else {
+			toVersion := cluster.Labels[ReleaseVersionLabel]
+			upgradeType := determineUpgradeType(previousVersion, toVersion)
+
+			// Determine event reason based on upgrade type
+			// - UpgradingWithNodeRoll: minor/major upgrades that will replace nodes
+			// - UpgradingWithoutNodeRoll: patch upgrades that won't replace nodes
+			var eventReason string
+			switch upgradeType {
+			case UpgradeTypePatch:
+				eventReason = "UpgradingWithoutNodeRoll"
+			case UpgradeTypeMinor, UpgradeTypeMajor:
+				eventReason = "UpgradingWithNodeRoll"
+			default:
+				// Unknown upgrade type (couldn't parse versions), default to with node roll to be safe
+				eventReason = "UpgradingWithNodeRoll"
+			}
+
 			log.Info("Cluster upgrade started",
 				"fromVersion", previousVersion,
-				"toVersion", cluster.Labels[ReleaseVersionLabel])
-			r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("from release %s to %s", previousVersion, cluster.Labels[ReleaseVersionLabel]))
+				"toVersion", toVersion,
+				"upgradeType", upgradeType,
+				"eventReason", eventReason)
+
+			// Simple event message with version info only
+			eventMessage := fmt.Sprintf("from release %s to %s", previousVersion, toVersion)
+			r.Recorder.Event(cluster, "Normal", eventReason, eventMessage)
 
 			// Update both version and timestamp when starting upgrade
 			err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
@@ -465,6 +489,53 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// UpgradeType represents the type of upgrade based on semver comparison
+type UpgradeType int
+
+const (
+	// UpgradeTypePatch indicates only patch version changed (e.g., 33.1.1 -> 33.1.2)
+	UpgradeTypePatch UpgradeType = iota
+	// UpgradeTypeMinor indicates minor version changed (e.g., 33.1.0 -> 33.2.0)
+	UpgradeTypeMinor
+	// UpgradeTypeMajor indicates major version changed (e.g., 33.0.0 -> 34.0.0)
+	UpgradeTypeMajor
+	// UpgradeTypeUnknown indicates we couldn't parse the versions
+	UpgradeTypeUnknown
+)
+
+// determineUpgradeType compares two release versions and returns the upgrade type.
+// Release versions are expected to be in semver format (e.g., "33.1.2").
+// Returns UpgradeTypePatch for patch-only changes, UpgradeTypeMinor for minor changes,
+// UpgradeTypeMajor for major changes, and UpgradeTypeUnknown if parsing fails.
+func determineUpgradeType(fromVersion, toVersion string) UpgradeType {
+	// Strip any leading "v" prefix if present
+	fromVersion = strings.TrimPrefix(fromVersion, "v")
+	toVersion = strings.TrimPrefix(toVersion, "v")
+
+	fromSemver, err := semver.Parse(fromVersion)
+	if err != nil {
+		return UpgradeTypeUnknown
+	}
+
+	toSemver, err := semver.Parse(toVersion)
+	if err != nil {
+		return UpgradeTypeUnknown
+	}
+
+	// Compare major versions
+	if fromSemver.Major != toSemver.Major {
+		return UpgradeTypeMajor
+	}
+
+	// Compare minor versions
+	if fromSemver.Minor != toSemver.Minor {
+		return UpgradeTypeMinor
+	}
+
+	// Only patch changed
+	return UpgradeTypePatch
 }
 
 func updateClusterAnnotations(client client.Client, cluster *capi.Cluster, modifyFunc func(*capi.Cluster)) error {
