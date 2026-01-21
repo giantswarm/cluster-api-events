@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed missing notification when upgrade target changes mid-upgrade. Previously, if the release version label was changed while an upgrade was already in progress (e.g., changing target from 32.2.0 to 33.1.3 while upgrading from 31.0.0), no notification would be sent. Now emits a new "Upgrading" event with "(upgrade target updated)" in the message, and resets tracking so control plane completion is re-sent for the new target.
+
 ### Changed
 
 - Changed upgrade event types to indicate whether nodes will be replaced based on semver comparison:
