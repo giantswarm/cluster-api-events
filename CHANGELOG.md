@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-01-22
+
 ### Fixed
 
 - Fallback to `karpenter.sh/nodepool` label when checking MachinePool node versions if no nodes are found with the `giantswarm.io/machine-pool` label.
@@ -228,7 +230,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.6...v1.0.7
