@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed patch upgrades never emitting completion event. The controller was waiting for the 30-second minimum duration but never re-reconciled because all CAPI conditions were already satisfied. Now requeues after the remaining time when only waiting for minimum duration.
+
+### Changed
+
+- Skip `UpgradedControlPlane` event for patch upgrades since control plane machines don't roll. Patch upgrades now emit only the start event (`UpgradingWithoutNodeRoll`) and completion event (`Upgraded`), providing a cleaner notification flow for customers.
+
+### Added
+
+- Store upgrade type (`patch`, `minor`, `major`) in cluster annotation `giantswarm.io/upgrade-type` for tracking during upgrade lifecycle.
+
 ## [1.1.0] - 2026-01-21
 
 ### Fixed
