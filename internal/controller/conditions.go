@@ -89,6 +89,8 @@ func getWorkloadClusterClient(ctx context.Context, c client.Client, cluster *cap
 // checkMachinePoolNodeVersions connects to workload cluster and checks node versions for a MachinePool
 func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capi.MachinePool, expectedVersion string) (bool, []string, error) {
 	logger := log.FromContext(ctx)
+
+	// Try primary Giant Swarm label first
 	labelSelector := fmt.Sprintf("giantswarm.io/machine-pool=%s", mp.Name)
 
 	// List nodes with minimal fields to reduce memory usage
@@ -103,10 +105,37 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 		return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s: %w", mp.Name, err)
 	}
 
-	// CRITICAL: If no nodes found, be conservative and return false
+	// If no nodes found with primary label, try Karpenter label as fallback
+	// This handles cases where Karpenter NodePools are not configured with giantswarm.io/machine-pool label
+	if len(nodes.Items) == 0 {
+		karpenterSelector := fmt.Sprintf("karpenter.sh/nodepool=%s", mp.Name)
+		logger.Info("No nodes found with giantswarm label, trying Karpenter label as fallback",
+			"machinePool", mp.Name,
+			"primaryLabel", labelSelector,
+			"fallbackLabel", karpenterSelector)
+
+		nodes, err = workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+			LabelSelector: karpenterSelector,
+			FieldSelector: "spec.unschedulable!=true",
+			Limit:         100,
+		})
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s with Karpenter label: %w", mp.Name, err)
+		}
+
+		if len(nodes.Items) > 0 {
+			labelSelector = karpenterSelector // Update for logging
+			logger.Info("Found nodes using Karpenter label fallback",
+				"machinePool", mp.Name,
+				"nodeCount", len(nodes.Items),
+				"labelSelector", karpenterSelector)
+		}
+	}
+
+	// CRITICAL: If no nodes found with either label, be conservative and return false
 	// This can happen due to:
 	// - Nodes not yet provisioned
-	// - Label selector mismatch
+	// - Label selector mismatch (neither giantswarm nor karpenter labels present)
 	// - RBAC issues returning empty list instead of error
 	if len(nodes.Items) == 0 {
 		logger.Info("No nodes found for MachinePool in workload cluster, marking as not ready",
