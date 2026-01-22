@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fallback to `karpenter.sh/nodepool` label when checking MachinePool node versions if no nodes are found with the `giantswarm.io/machine-pool` label.
 - Consider MachinePools with 0 nodes as ready for upgrade completion. This fixes upgrades getting stuck when Karpenter NodePools have no provisioned nodes (e.g., scale-to-zero, no workloads scheduled).
+- Add pagination support when listing nodes for MachinePool version checks. Previously only the first 100 nodes were checked; now all nodes are retrieved using continue tokens.
 
 ## [1.2.0] - 2026-01-22
 
