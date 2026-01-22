@@ -126,3 +126,26 @@ func TestDetermineUpgradeType(t *testing.T) {
 		})
 	}
 }
+
+func TestUpgradeTypeString(t *testing.T) {
+	tests := []struct {
+		upgradeType UpgradeType
+		expected    string
+	}{
+		{UpgradeTypePatch, "patch"},
+		{UpgradeTypeMinor, "minor"},
+		{UpgradeTypeMajor, "major"},
+		{UpgradeTypeUnknown, "unknown"},
+		{UpgradeType(99), "unknown"}, // Invalid value defaults to unknown
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			result := tt.upgradeType.String()
+			if result != tt.expected {
+				t.Errorf("UpgradeType(%d).String() = %q, want %q",
+					tt.upgradeType, result, tt.expected)
+			}
+		})
+	}
+}

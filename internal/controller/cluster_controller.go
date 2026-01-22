@@ -49,6 +49,7 @@ const (
 	ClusterUpgradingAnnotation          = "giantswarm.io/cluster-upgrading"
 	EmittedEventsAnnotation             = "giantswarm.io/emitted-upgrade-events"
 	UpgradeStartTimeAnnotation          = "giantswarm.io/upgrade-start-time"
+	UpgradeTypeAnnotation               = "giantswarm.io/upgrade-type"
 
 	// MinUpgradeDuration is the minimum time that must pass after an upgrade starts
 	// before we consider it complete. This prevents race conditions where CAPI
@@ -257,6 +258,8 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			// Reset upgrade start time since we're effectively tracking a new upgrade target
 			c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+			// Update upgrade type for the new target
+			c.Annotations[UpgradeTypeAnnotation] = upgradeType.String()
 			// Clear emitted events since the target changed - control plane may need to upgrade further
 			delete(c.Annotations, EmittedEventsAnnotation)
 		})
@@ -311,6 +314,8 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				c.Annotations[ClusterUpgradingAnnotation] = "true"
 				// Record wall clock time when upgrade starts - used to enforce minimum upgrade duration
 				c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+				// Store upgrade type for later use (to skip UpgradedControlPlane for patches)
+				c.Annotations[UpgradeTypeAnnotation] = upgradeType.String()
 				// Set timestamp to current available time to prevent it being reset
 				if readyTransition, ok := conditionTimeStampFromAvailableState(c, capi.AvailableCondition); ok {
 					c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
@@ -422,9 +427,13 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane" ||
 				cluster.Annotations[EmittedEventsAnnotation] == "Upgraded"
 
+			// Skip UpgradedControlPlane event for patch upgrades since control plane machines don't roll
+			isPatchUpgrade := cluster.Annotations[UpgradeTypeAnnotation] == "patch"
+
 			// Control plane is done when it's ready, up-to-date, versions match, AND minimum duration has passed
 			// The minimum duration check prevents race conditions where CAPI hasn't updated conditions yet
-			if controlPlaneReady && controlPlaneUpToDate && versionsMatch && minDurationPassed && !controlPlaneEventSent {
+			// Skip this event for patch upgrades since CP machines don't actually roll
+			if controlPlaneReady && controlPlaneUpToDate && versionsMatch && minDurationPassed && !controlPlaneEventSent && !isPatchUpgrade {
 				// Try to atomically claim the event by updating annotation first
 				// This prevents race conditions where multiple reconciles send duplicate events
 				eventClaimed := false
@@ -532,6 +541,22 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					reasons = append(reasons, fmt.Sprintf("minimum duration not passed (need %s)", MinUpgradeDuration))
 				}
 				log.Info("Upgrade still in progress", "waitingFor", reasons)
+
+				// If only waiting for minimum duration (all other conditions are met),
+				// requeue after the remaining time. This is especially important for
+				// patch upgrades where conditions are satisfied immediately and no
+				// other changes trigger a reconcile.
+				allOtherConditionsMet := controlPlaneReady && controlPlaneUpToDate &&
+					allWorkerNodesReady && clusterNotRollingOut && versionsMatch
+				if allOtherConditionsMet && !minDurationPassed && !upgradeStartTime.IsZero() {
+					elapsed := time.Since(upgradeStartTime)
+					remaining := MinUpgradeDuration - elapsed
+					if remaining > 0 {
+						log.Info("Requeuing to check completion after minimum duration",
+							"requeueAfter", remaining.Round(time.Second))
+						return ctrl.Result{RequeueAfter: remaining}, nil
+					}
+				}
 			}
 		}
 	}
@@ -552,6 +577,20 @@ const (
 	// UpgradeTypeUnknown indicates we couldn't parse the versions
 	UpgradeTypeUnknown
 )
+
+// String returns the string representation of the upgrade type
+func (u UpgradeType) String() string {
+	switch u {
+	case UpgradeTypePatch:
+		return "patch"
+	case UpgradeTypeMinor:
+		return "minor"
+	case UpgradeTypeMajor:
+		return "major"
+	default:
+		return "unknown"
+	}
+}
 
 // determineUpgradeType compares two release versions and returns the upgrade type.
 // Release versions are expected to be in semver format (e.g., "33.1.2").
@@ -670,6 +709,7 @@ func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, 
 		if !isUpgrading {
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			delete(c.Annotations, UpgradeStartTimeAnnotation)
+			delete(c.Annotations, UpgradeTypeAnnotation)
 			// EmittedEventsAnnotation is cleared at the start of the NEXT upgrade, not here
 		}
 	})
