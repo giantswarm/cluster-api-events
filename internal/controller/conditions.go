@@ -132,17 +132,18 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 		}
 	}
 
-	// CRITICAL: If no nodes found with either label, be conservative and return false
-	// This can happen due to:
-	// - Nodes not yet provisioned
-	// - Label selector mismatch (neither giantswarm nor karpenter labels present)
-	// - RBAC issues returning empty list instead of error
+	// If no nodes found with either label, return true since there are no nodes to upgrade.
+	// This handles the case where:
+	// - Karpenter NodePool has 0 nodes (no workloads scheduled, scale-to-zero, etc.)
+	// - Nodes are still being provisioned (will get new version from launch template)
+	// For externally-managed pools (Karpenter), this is expected behavior - future nodes
+	// will be provisioned with the new configuration.
 	if len(nodes.Items) == 0 {
-		logger.Info("No nodes found for MachinePool in workload cluster, marking as not ready",
+		logger.Info("No nodes found for MachinePool in workload cluster - considering ready (0 nodes = 0 nodes to upgrade)",
 			"machinePool", mp.Name,
 			"labelSelector", labelSelector,
 			"expectedVersion", expectedVersion)
-		return false, []string{"no nodes found with label selector"}, nil
+		return true, nil, nil
 	}
 
 	logger.V(1).Info("Checking node versions for MachinePool",
