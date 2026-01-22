@@ -93,41 +93,58 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 	// Try primary Giant Swarm label first
 	labelSelector := fmt.Sprintf("giantswarm.io/machine-pool=%s", mp.Name)
 
-	// List nodes with minimal fields to reduce memory usage
-	nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-		// Limit fields to only what we need to reduce memory usage
-		FieldSelector: "spec.unschedulable!=true",
-		// Limit the number of nodes returned to prevent memory issues
-		Limit: 100,
-	})
-	if err != nil {
-		return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s: %w", mp.Name, err)
+	// List all nodes using pagination to handle large clusters
+	var allNodes []corev1.Node
+	continueToken := ""
+	for {
+		nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+			FieldSelector: "spec.unschedulable!=true",
+			Limit:         100,
+			Continue:      continueToken,
+		})
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s: %w", mp.Name, err)
+		}
+		allNodes = append(allNodes, nodes.Items...)
+		if nodes.Continue == "" {
+			break
+		}
+		continueToken = nodes.Continue
 	}
 
 	// If no nodes found with primary label, try Karpenter label as fallback
 	// This handles cases where Karpenter NodePools are not configured with giantswarm.io/machine-pool label
-	if len(nodes.Items) == 0 {
+	if len(allNodes) == 0 {
 		karpenterSelector := fmt.Sprintf("karpenter.sh/nodepool=%s", mp.Name)
 		logger.Info("No nodes found with giantswarm label, trying Karpenter label as fallback",
 			"machinePool", mp.Name,
 			"primaryLabel", labelSelector,
 			"fallbackLabel", karpenterSelector)
 
-		nodes, err = workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-			LabelSelector: karpenterSelector,
-			FieldSelector: "spec.unschedulable!=true",
-			Limit:         100,
-		})
-		if err != nil {
-			return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s with Karpenter label: %w", mp.Name, err)
+		continueToken = ""
+		for {
+			nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+				LabelSelector: karpenterSelector,
+				FieldSelector: "spec.unschedulable!=true",
+				Limit:         100,
+				Continue:      continueToken,
+			})
+			if err != nil {
+				return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s with Karpenter label: %w", mp.Name, err)
+			}
+			allNodes = append(allNodes, nodes.Items...)
+			if nodes.Continue == "" {
+				break
+			}
+			continueToken = nodes.Continue
 		}
 
-		if len(nodes.Items) > 0 {
+		if len(allNodes) > 0 {
 			labelSelector = karpenterSelector // Update for logging
 			logger.Info("Found nodes using Karpenter label fallback",
 				"machinePool", mp.Name,
-				"nodeCount", len(nodes.Items),
+				"nodeCount", len(allNodes),
 				"labelSelector", karpenterSelector)
 		}
 	}
@@ -138,7 +155,7 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 	// - Nodes are still being provisioned (will get new version from launch template)
 	// For externally-managed pools (Karpenter), this is expected behavior - future nodes
 	// will be provisioned with the new configuration.
-	if len(nodes.Items) == 0 {
+	if len(allNodes) == 0 {
 		logger.Info("No nodes found for MachinePool in workload cluster - considering ready (0 nodes = 0 nodes to upgrade)",
 			"machinePool", mp.Name,
 			"labelSelector", labelSelector,
@@ -148,7 +165,7 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 
 	logger.V(1).Info("Checking node versions for MachinePool",
 		"machinePool", mp.Name,
-		"nodeCount", len(nodes.Items),
+		"nodeCount", len(allNodes),
 		"expectedVersion", expectedVersion,
 		"labelSelector", labelSelector)
 
@@ -156,7 +173,7 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 	allCorrectVersion := true
 	checkedNodeCount := 0
 
-	for _, node := range nodes.Items {
+	for _, node := range allNodes {
 		// Skip nodes being drained/cordoned (unschedulable) - should be filtered by FieldSelector but double-check
 		if node.Spec.Unschedulable {
 			logger.V(1).Info("Skipping unschedulable node in MachinePool version check",
@@ -195,7 +212,7 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 	if checkedNodeCount == 0 {
 		logger.Info("All nodes for MachinePool are unschedulable, marking as not ready",
 			"machinePool", mp.Name,
-			"totalNodes", len(nodes.Items))
+			"totalNodes", len(allNodes))
 		return false, []string{"all nodes unschedulable"}, nil
 	}
 
