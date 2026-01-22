@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fallback to `karpenter.sh/nodepool` label when checking MachinePool node versions. This fixes upgrade completion detection for Karpenter NodePools that don't have the `giantswarm.io/machine-pool` label configured.
+
 ## [1.2.0] - 2026-01-22
 
 ### Fixed
