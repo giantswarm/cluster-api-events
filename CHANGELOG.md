@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-01-22
+
 ### Fixed
 
 - Fixed patch upgrades never emitting completion event. The controller was waiting for the 30-second minimum duration but never re-reconciled because all CAPI conditions were already satisfied. Now requeues after the remaining time when only waiting for minimum duration.
@@ -220,7 +222,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.5...v1.0.6
