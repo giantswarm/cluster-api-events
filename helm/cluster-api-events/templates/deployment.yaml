@@ -27,12 +27,16 @@ spec:
         {{- end }}
       containers:
       - name: {{ .Chart.Name }}
-        image: "{{ .Values.image.registry }}/{{ .Values.image.name }}:{{ .Values.image.tag }}"
+        image: "{{ .Values.image.registry }}/{{ .Values.image.name }}:{{ include "image.tag" . }}"
         imagePullPolicy: "{{ .Values.image.pullPolicy }}"
         command:
         - /manager
         args:
         - --leader-elect
+        ports:
+        - name: http
+          containerPort: 8081
+          protocol: TCP
         livenessProbe:
           httpGet:
             path: /healthz
