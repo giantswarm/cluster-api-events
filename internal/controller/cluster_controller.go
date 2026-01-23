@@ -1,5 +1,5 @@
 /*
-Copyright 2024.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,16 +20,17 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/blang/semver/v4"
 	"github.com/giantswarm/microerror"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
-	capi "sigs.k8s.io/cluster-api/api/v1beta1"
-	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
+	capi "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -47,6 +48,16 @@ const (
 	LastKnownUpgradeTimestampAnnotation = "giantswarm.io/last-known-cluster-upgrade-timestamp"
 	ClusterUpgradingAnnotation          = "giantswarm.io/cluster-upgrading"
 	EmittedEventsAnnotation             = "giantswarm.io/emitted-upgrade-events"
+	UpgradeStartTimeAnnotation          = "giantswarm.io/upgrade-start-time"
+	UpgradeTypeAnnotation               = "giantswarm.io/upgrade-type"
+
+	// MinUpgradeDuration is the minimum time that must pass after an upgrade starts
+	// before we consider it complete. This prevents race conditions where CAPI
+	// conditions haven't been updated yet to reflect the upgrade in progress.
+	//
+	// This is conservative - if the reconciler is slow due to high load, we may
+	// wait longer than necessary, but this prevents false completion events.
+	MinUpgradeDuration = 30 * time.Second
 )
 
 // ClusterReconciler reconciles a Cluster object
@@ -184,46 +195,144 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, microerror.Mask(err)
 	}
 
-	controlPlaneUpgrading := isClusterUpgrading(cluster, capi.ReadyCondition)
+	controlPlaneUpgrading := isClusterUpgrading(cluster)
 	releaseVersionDifferent := isClusterReleaseVersionDifferent(cluster)
+	// Check if we're currently marked as upgrading to avoid duplicate events
+	currentlyMarkedAsUpgrading := cluster.Annotations[ClusterUpgradingAnnotation] == "true"
 
-	if controlPlaneUpgrading || workerNodesUpgrading || releaseVersionDifferent {
+	if controlPlaneUpgrading || workerNodesUpgrading || releaseVersionDifferent || currentlyMarkedAsUpgrading {
 		log.Info("Cluster upgrade status check",
 			"controlPlaneUpgrading", controlPlaneUpgrading,
 			"workerNodesUpgrading", workerNodesUpgrading,
 			"releaseVersionDifferent", releaseVersionDifferent,
 			"currentVersion", cluster.Labels[ReleaseVersionLabel],
 			"lastKnownVersion", cluster.Annotations[LastKnownUpgradeVersionAnnotation],
-			"clusterUpgrading", cluster.Annotations[ClusterUpgradingAnnotation])
+			"clusterUpgrading", cluster.Annotations[ClusterUpgradingAnnotation],
+			"currentlyMarkedAsUpgrading", currentlyMarkedAsUpgrading)
 	}
 
-	sendUpgradingEvent := (controlPlaneUpgrading || workerNodesUpgrading) && releaseVersionDifferent
-	if sendUpgradingEvent {
-		log.Info("Cluster upgrade started",
-			"fromVersion", cluster.Annotations[LastKnownUpgradeVersionAnnotation],
-			"toVersion", cluster.Labels[ReleaseVersionLabel])
-		r.Recorder.Event(cluster, "Normal", "Upgrading", fmt.Sprintf("from release %s to %s", cluster.Annotations[LastKnownUpgradeVersionAnnotation], cluster.Labels[ReleaseVersionLabel]))
+	// Send upgrading event when:
+	// 1. Release version is different (label changed)
+	// 2. AND we haven't already marked this cluster as upgrading (avoid duplicate events)
+	// 3. AND there is a previous version (not a new cluster creation)
+	// Note: We don't require controlPlaneUpgrading or workerNodesUpgrading here because
+	// the RollingOutCondition may not be set immediately or consistently by all providers
+	previousVersion := cluster.Annotations[LastKnownUpgradeVersionAnnotation]
+	hasValidPreviousVersion := previousVersion != "" && previousVersion != cluster.Labels[ReleaseVersionLabel]
+	sendUpgradingEvent := releaseVersionDifferent && !currentlyMarkedAsUpgrading && hasValidPreviousVersion
 
-		// Update both version and timestamp when starting upgrade
+	// Detect target change mid-upgrade: the release version label was changed while
+	// an upgrade was already in progress. In this case, we should emit a new event
+	// to notify about the updated target version.
+	targetChangedMidUpgrade := releaseVersionDifferent && currentlyMarkedAsUpgrading && hasValidPreviousVersion
+
+	if targetChangedMidUpgrade {
+		// Target version changed while upgrade was in progress
+		// Emit a new event with the updated version transition
+		toVersion := cluster.Labels[ReleaseVersionLabel]
+		upgradeType := determineUpgradeType(previousVersion, toVersion)
+
+		var eventReason string
+		switch upgradeType {
+		case UpgradeTypePatch:
+			eventReason = "UpgradingWithoutNodeRoll"
+		case UpgradeTypeMinor, UpgradeTypeMajor:
+			eventReason = "UpgradingWithNodeRoll"
+		default:
+			eventReason = "UpgradingWithNodeRoll"
+		}
+
+		log.Info("Cluster upgrade target changed mid-upgrade",
+			"fromVersion", previousVersion,
+			"toVersion", toVersion,
+			"upgradeType", upgradeType,
+			"eventReason", eventReason)
+
+		// Message indicates this is a target change, not a new upgrade
+		eventMessage := fmt.Sprintf("from release %s to %s (upgrade target updated)", previousVersion, toVersion)
+		r.Recorder.Event(cluster, "Normal", eventReason, eventMessage)
+
+		// Update the annotation to track the new target version
+		// Keep ClusterUpgradingAnnotation as "true" since upgrade is still in progress
 		err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
-			c.Annotations[ClusterUpgradingAnnotation] = "true"
-			// Set timestamp to current ready time to prevent it being reset
-			if readyTransition, ok := conditionTimeStampFromReadyState(c, capi.ReadyCondition); ok {
-				c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
-			}
-			// Clear emitted events when starting a new upgrade
+			// Reset upgrade start time since we're effectively tracking a new upgrade target
+			c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+			// Update upgrade type for the new target
+			c.Annotations[UpgradeTypeAnnotation] = upgradeType.String()
+			// Clear emitted events since the target changed - control plane may need to upgrade further
 			delete(c.Annotations, EmittedEventsAnnotation)
 		})
 		if err != nil {
 			return ctrl.Result{}, microerror.Mask(err)
 		}
+		// Refetch cluster after update
+		if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
+			return ctrl.Result{}, microerror.Mask(err)
+		}
+	} else if sendUpgradingEvent {
+		// Double-check by refetching the cluster to prevent race conditions
+		// where multiple reconciles could send duplicate "Upgrading" events
+		latestCluster := &capi.Cluster{}
+		if err := r.Get(ctx, req.NamespacedName, latestCluster); err != nil {
+			return ctrl.Result{}, microerror.Mask(err)
+		}
+		// If another reconcile already marked it as upgrading, skip sending the event
+		if latestCluster.Annotations[ClusterUpgradingAnnotation] == "true" {
+			log.Info("Upgrade already started by another reconcile, skipping event")
+		} else {
+			toVersion := cluster.Labels[ReleaseVersionLabel]
+			upgradeType := determineUpgradeType(previousVersion, toVersion)
+
+			// Determine event reason based on upgrade type
+			// - UpgradingWithNodeRoll: minor/major upgrades that will replace nodes
+			// - UpgradingWithoutNodeRoll: patch upgrades that won't replace nodes
+			var eventReason string
+			switch upgradeType {
+			case UpgradeTypePatch:
+				eventReason = "UpgradingWithoutNodeRoll"
+			case UpgradeTypeMinor, UpgradeTypeMajor:
+				eventReason = "UpgradingWithNodeRoll"
+			default:
+				// Unknown upgrade type (couldn't parse versions), default to with node roll to be safe
+				eventReason = "UpgradingWithNodeRoll"
+			}
+
+			log.Info("Cluster upgrade started",
+				"fromVersion", previousVersion,
+				"toVersion", toVersion,
+				"upgradeType", upgradeType,
+				"eventReason", eventReason)
+
+			// Simple event message with version info only
+			eventMessage := fmt.Sprintf("from release %s to %s", previousVersion, toVersion)
+			r.Recorder.Event(cluster, "Normal", eventReason, eventMessage)
+
+			// Update both version and timestamp when starting upgrade
+			err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+				c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
+				c.Annotations[ClusterUpgradingAnnotation] = "true"
+				// Record wall clock time when upgrade starts - used to enforce minimum upgrade duration
+				c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+				// Store upgrade type for later use (to skip UpgradedControlPlane for patches)
+				c.Annotations[UpgradeTypeAnnotation] = upgradeType.String()
+				// Set timestamp to current available time to prevent it being reset
+				if readyTransition, ok := conditionTimeStampFromAvailableState(c, capi.AvailableCondition); ok {
+					c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
+				}
+				// Clear emitted events when starting a new upgrade
+				delete(c.Annotations, EmittedEventsAnnotation)
+			})
+			if err != nil {
+				return ctrl.Result{}, microerror.Mask(err)
+			}
+		}
 	}
 
-	// wait for cluster is ready the first time
-	readyTransition, ok := conditionTimeStampFromReadyState(cluster, capi.ReadyCondition)
+	// wait for cluster is available the first time
+	readyTransition, ok := conditionTimeStampFromAvailableState(cluster, capi.AvailableCondition)
 	if !ok {
-		log.V(1).Info("Cluster control plane not ready yet, waiting...")
+		log.V(1).Info("Cluster control plane not available yet, waiting...")
 		return ctrl.Result{}, nil
 	}
 	readyTransitionTime := readyTransition.UTC()
@@ -242,53 +351,170 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		// Only check worker nodes if we're actually upgrading
 		if isCurrentlyUpgrading {
+			// Check minimum upgrade duration to prevent race conditions
+			// CAPI conditions may not be updated immediately when upgrade starts
+			var upgradeStartTime time.Time
+			minDurationPassed := false
+			if startTimeStr, ok := cluster.Annotations[UpgradeStartTimeAnnotation]; ok {
+				if t, err := time.Parse(time.RFC3339, startTimeStr); err == nil {
+					upgradeStartTime = t
+					minDurationPassed = time.Since(upgradeStartTime) >= MinUpgradeDuration
+				}
+			} else {
+				// Annotation missing - this is an upgrade that started before this fix was deployed,
+				// or controller restarted. Use the last known transition time as fallback.
+				// If that's also missing or recent, use a safe default.
+				if !lastKnownTransitionTime.IsZero() {
+					upgradeStartTime = lastKnownTransitionTime
+					minDurationPassed = time.Since(lastKnownTransitionTime) >= MinUpgradeDuration
+				} else {
+					// No timing info available - set the annotation now and wait
+					log.Info("Missing upgrade start time annotation, setting it now")
+					if err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+						c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+					}); err != nil {
+						log.Error(err, "Failed to set upgrade start time annotation")
+					}
+					// Don't pass yet, wait for next reconcile
+					minDurationPassed = false
+				}
+			}
+
+			// In v1beta2, we use Cluster-level conditions which are more reliable than checking individual MachinePool conditions
+			// The Cluster aggregates the status of all its components
+			controlPlaneReady := isClusterReady(cluster, capi.AvailableCondition)
+			versionsMatch := !isClusterReleaseVersionDifferent(cluster)
+
+			// Check if control plane machines are up-to-date (v1beta2)
+			controlPlaneUpToDate := isClusterReady(cluster, capi.ClusterControlPlaneMachinesUpToDateCondition)
+
+			// Check v1beta2 Cluster-level worker conditions (used for logging, but NOT trusted for MachinePools)
+			// These conditions aggregate the status of all MachinePools and MachineDeployments
+			workerMachinesReady := isClusterReady(cluster, capi.ClusterWorkerMachinesReadyCondition)
+			workerMachinesUpToDate := isClusterReady(cluster, capi.ClusterWorkerMachinesUpToDateCondition)
+			clusterNotRollingOut := !isClusterUpgrading(cluster) // RollingOut condition is False
+
+			// ALWAYS verify actual workload cluster node versions for MachinePools
+			// CAPI conditions can report "up-to-date" based on ASG/Launch Template state,
+			// but the actual nodes in the cluster may not be replaced yet.
+			// This is critical for accurate upgrade completion detection.
 			allWorkerNodesReady, err := areAllWorkerNodesReady(ctx, r.Client, cluster)
 			if err != nil {
 				log.Error(err, "Failed to check worker node ready status")
 				return ctrl.Result{}, microerror.Mask(err)
 			}
 
-			controlPlaneReady := isClusterReady(cluster, capi.ReadyCondition)
+			// Time progressed check is only used for duration calculation now
+			// We no longer require it for completion since clusters may stay Available throughout upgrade
 			timeProgressed := readyTransitionTime.After(lastKnownTransitionTime)
-			versionsMatch := !isClusterReleaseVersionDifferent(cluster)
 
 			log.Info("Upgrade in progress - checking completion criteria",
 				"controlPlaneReady", controlPlaneReady,
+				"controlPlaneUpToDate", controlPlaneUpToDate,
+				"workerMachinesReady", workerMachinesReady,
+				"workerMachinesUpToDate", workerMachinesUpToDate,
+				"clusterNotRollingOut", clusterNotRollingOut,
 				"allWorkerNodesReady", allWorkerNodesReady,
+				"minDurationPassed", minDurationPassed,
+				"upgradeStartTime", upgradeStartTime,
 				"timeProgressed", timeProgressed,
 				"versionsMatch", versionsMatch,
 				"lastTransitionTime", lastKnownTransitionTime,
 				"currentReadyTime", readyTransitionTime)
 
 			// Control plane completed event (only sent once)
-			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane"
+			// Use atomic claim-and-emit pattern to prevent duplicate events from concurrent reconciles
+			controlPlaneEventSent := cluster.Annotations[EmittedEventsAnnotation] == "UpgradedControlPlane" ||
+				cluster.Annotations[EmittedEventsAnnotation] == "Upgraded"
 
-			if controlPlaneReady && timeProgressed && versionsMatch && !controlPlaneEventSent {
-				log.Info("Control plane upgraded")
-				r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
-					fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
+			// Skip UpgradedControlPlane event for patch upgrades since control plane machines don't roll
+			isPatchUpgrade := cluster.Annotations[UpgradeTypeAnnotation] == "patch"
 
-				// Mark event as sent
-				err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+			// Control plane is done when it's ready, up-to-date, versions match, AND minimum duration has passed
+			// The minimum duration check prevents race conditions where CAPI hasn't updated conditions yet
+			// Skip this event for patch upgrades since CP machines don't actually roll
+			if controlPlaneReady && controlPlaneUpToDate && versionsMatch && minDurationPassed && !controlPlaneEventSent && !isPatchUpgrade {
+				// Try to atomically claim the event by updating annotation first
+				// This prevents race conditions where multiple reconciles send duplicate events
+				eventClaimed := false
+				err := updateClusterAnnotationsWithCheck(r.Client, cluster, EmittedEventsAnnotation, "UpgradedControlPlane", func(c *capi.Cluster, currentValue string) bool {
+					// Check if already claimed by another reconcile
+					if currentValue == "UpgradedControlPlane" || currentValue == "Upgraded" {
+						return false // Don't claim, already sent
+					}
 					c.Annotations[EmittedEventsAnnotation] = "UpgradedControlPlane"
-				})
+					return true // Claimed
+				}, &eventClaimed)
 				if err != nil {
 					log.Error(err, "Failed to update control plane event annotation")
+				} else if eventClaimed {
+					// Only send event after successfully claiming the annotation
+					log.Info("Control plane upgraded")
+					r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
+						fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
+				} else {
+					log.Info("Control plane event already sent by another reconcile, skipping")
 				}
 			}
 
-			// Only send upgrade complete event when both control plane AND worker nodes are ready
+			// Upgrade is complete when:
+			// 1. Control plane is ready and up-to-date
+			// 2. All worker nodes are ready and up-to-date
+			// 3. Cluster is not rolling out (no active upgrade in progress)
+			// 4. Versions match
+			// 5. Minimum upgrade duration has passed (prevents race conditions with CAPI condition updates)
 			sendUpgradeEvent := controlPlaneReady &&
+				controlPlaneUpToDate &&
 				allWorkerNodesReady &&
-				timeProgressed &&
-				versionsMatch
+				clusterNotRollingOut &&
+				versionsMatch &&
+				minDurationPassed
 
-			if sendUpgradeEvent {
-				duration := readyTransitionTime.Sub(lastKnownTransitionTime).Round(time.Second)
-				log.Info("Cluster upgrade completed successfully",
-					"version", cluster.Labels[ReleaseVersionLabel],
-					"duration", duration)
-				r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("to release %s in %s", cluster.Labels[ReleaseVersionLabel], duration))
+			// Check if we already sent the completion event (prevents duplicate events from concurrent reconciles)
+			upgradeEventAlreadySent := cluster.Annotations[EmittedEventsAnnotation] == "Upgraded"
+
+			if sendUpgradeEvent && !upgradeEventAlreadySent {
+				// Calculate duration from upgrade start time
+				var duration time.Duration
+				if !upgradeStartTime.IsZero() {
+					duration = time.Since(upgradeStartTime).Round(time.Second)
+				} else if timeProgressed {
+					duration = readyTransitionTime.Sub(lastKnownTransitionTime).Round(time.Second)
+				} else {
+					// Fallback to time since last known transition
+					duration = time.Since(lastKnownTransitionTime).Round(time.Second)
+				}
+
+				// Try to atomically claim the upgrade event by updating annotation first
+				// This prevents race conditions where multiple reconciles send duplicate events
+				eventClaimed := false
+				err := updateClusterAnnotationsWithCheck(r.Client, cluster, EmittedEventsAnnotation, "Upgraded", func(c *capi.Cluster, currentValue string) bool {
+					// Check if already claimed by another reconcile
+					if currentValue == "Upgraded" {
+						return false // Don't claim, already sent
+					}
+					c.Annotations[EmittedEventsAnnotation] = "Upgraded"
+					return true // Claimed
+				}, &eventClaimed)
+				if err != nil {
+					log.Error(err, "Failed to mark upgrade event as sent")
+				} else if eventClaimed {
+					// Only send event after successfully claiming the annotation
+					log.Info("Cluster upgrade completed successfully",
+						"version", cluster.Labels[ReleaseVersionLabel],
+						"duration", duration)
+					r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("to release %s in %s", cluster.Labels[ReleaseVersionLabel], duration))
+				} else {
+					log.Info("Upgrade event already sent by another reconcile, skipping")
+				}
+
+				err = updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
+				if err != nil {
+					return ctrl.Result{}, microerror.Mask(err)
+				}
+			} else if sendUpgradeEvent && upgradeEventAlreadySent {
+				// Already sent the event, just update the state
+				log.Info("Upgrade event already sent, just updating state")
 				err := updateLastKnownTransitionTime(r.Client, cluster, readyTransitionTime, false)
 				if err != nil {
 					return ctrl.Result{}, microerror.Mask(err)
@@ -299,21 +525,104 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				if !controlPlaneReady {
 					reasons = append(reasons, "control plane not ready")
 				}
+				if !controlPlaneUpToDate {
+					reasons = append(reasons, "control plane not up-to-date")
+				}
 				if !allWorkerNodesReady {
 					reasons = append(reasons, "worker nodes not ready")
 				}
-				if !timeProgressed {
-					reasons = append(reasons, "time not progressed")
+				if !clusterNotRollingOut {
+					reasons = append(reasons, "cluster still rolling out")
 				}
 				if !versionsMatch {
 					reasons = append(reasons, "versions don't match")
 				}
+				if !minDurationPassed {
+					reasons = append(reasons, fmt.Sprintf("minimum duration not passed (need %s)", MinUpgradeDuration))
+				}
 				log.Info("Upgrade still in progress", "waitingFor", reasons)
+
+				// If only waiting for minimum duration (all other conditions are met),
+				// requeue after the remaining time. This is especially important for
+				// patch upgrades where conditions are satisfied immediately and no
+				// other changes trigger a reconcile.
+				allOtherConditionsMet := controlPlaneReady && controlPlaneUpToDate &&
+					allWorkerNodesReady && clusterNotRollingOut && versionsMatch
+				if allOtherConditionsMet && !minDurationPassed && !upgradeStartTime.IsZero() {
+					elapsed := time.Since(upgradeStartTime)
+					remaining := MinUpgradeDuration - elapsed
+					if remaining > 0 {
+						log.Info("Requeuing to check completion after minimum duration",
+							"requeueAfter", remaining.Round(time.Second))
+						return ctrl.Result{RequeueAfter: remaining}, nil
+					}
+				}
 			}
 		}
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// UpgradeType represents the type of upgrade based on semver comparison
+type UpgradeType int
+
+const (
+	// UpgradeTypePatch indicates only patch version changed (e.g., 33.1.1 -> 33.1.2)
+	UpgradeTypePatch UpgradeType = iota
+	// UpgradeTypeMinor indicates minor version changed (e.g., 33.1.0 -> 33.2.0)
+	UpgradeTypeMinor
+	// UpgradeTypeMajor indicates major version changed (e.g., 33.0.0 -> 34.0.0)
+	UpgradeTypeMajor
+	// UpgradeTypeUnknown indicates we couldn't parse the versions
+	UpgradeTypeUnknown
+)
+
+// String returns the string representation of the upgrade type
+func (u UpgradeType) String() string {
+	switch u {
+	case UpgradeTypePatch:
+		return "patch"
+	case UpgradeTypeMinor:
+		return "minor"
+	case UpgradeTypeMajor:
+		return "major"
+	default:
+		return "unknown"
+	}
+}
+
+// determineUpgradeType compares two release versions and returns the upgrade type.
+// Release versions are expected to be in semver format (e.g., "33.1.2").
+// Returns UpgradeTypePatch for patch-only changes, UpgradeTypeMinor for minor changes,
+// UpgradeTypeMajor for major changes, and UpgradeTypeUnknown if parsing fails.
+func determineUpgradeType(fromVersion, toVersion string) UpgradeType {
+	// Strip any leading "v" prefix if present
+	fromVersion = strings.TrimPrefix(fromVersion, "v")
+	toVersion = strings.TrimPrefix(toVersion, "v")
+
+	fromSemver, err := semver.Parse(fromVersion)
+	if err != nil {
+		return UpgradeTypeUnknown
+	}
+
+	toSemver, err := semver.Parse(toVersion)
+	if err != nil {
+		return UpgradeTypeUnknown
+	}
+
+	// Compare major versions
+	if fromSemver.Major != toSemver.Major {
+		return UpgradeTypeMajor
+	}
+
+	// Compare minor versions
+	if fromSemver.Minor != toSemver.Minor {
+		return UpgradeTypeMinor
+	}
+
+	// Only patch changed
+	return UpgradeTypePatch
 }
 
 func updateClusterAnnotations(client client.Client, cluster *capi.Cluster, modifyFunc func(*capi.Cluster)) error {
@@ -342,14 +651,66 @@ func updateClusterAnnotations(client client.Client, cluster *capi.Cluster, modif
 	})
 }
 
+// updateClusterAnnotationsWithCheck is similar to updateClusterAnnotations but allows
+// checking the current annotation value before deciding whether to modify it.
+// This enables atomic "claim-and-emit" patterns for events where we need to prevent
+// duplicate event emission from concurrent reconciles.
+//
+// The checkAndModify function receives the cluster and the current value of the specified
+// annotation key. It should return true if the modification was made (event should be emitted),
+// or false if the annotation was already set by another reconcile (skip event emission).
+// The claimed result is written to the claimed pointer after successful update.
+func updateClusterAnnotationsWithCheck(c client.Client, cluster *capi.Cluster, annotationKey string, expectedValue string, checkAndModify func(*capi.Cluster, string) bool, claimed *bool) error {
+	*claimed = false
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestCluster := &capi.Cluster{}
+		if err := c.Get(context.Background(), types.NamespacedName{
+			Name:      cluster.Name,
+			Namespace: cluster.Namespace,
+		}, latestCluster); err != nil {
+			return err
+		}
+
+		if latestCluster.Annotations == nil {
+			latestCluster.Annotations = make(map[string]string)
+		}
+
+		currentValue := latestCluster.Annotations[annotationKey]
+		shouldModify := checkAndModify(latestCluster, currentValue)
+
+		if !shouldModify {
+			// Another reconcile already claimed this, no need to update
+			*claimed = false
+			return nil
+		}
+
+		if err := c.Update(context.Background(), latestCluster); err != nil {
+			// On conflict, reset claimed and retry
+			*claimed = false
+			return err
+		}
+
+		// Successfully updated, we claimed it
+		*claimed = true
+		return nil
+	})
+}
+
 func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, transitionTime time.Time, isUpgrading bool) error {
 	return updateClusterAnnotations(client, cluster, func(c *capi.Cluster) {
 		c.Annotations[LastKnownUpgradeTimestampAnnotation] = transitionTime.Format(time.RFC3339)
 		c.Annotations[ClusterUpgradingAnnotation] = strconv.FormatBool(isUpgrading)
 
-		// Clear emitted events when upgrade completes
+		// When upgrade completes, update the last known version and clean up timing annotations
+		// NOTE: We intentionally do NOT delete EmittedEventsAnnotation here!
+		// Deleting it would allow concurrent reconciles still in the upgrade-checking block
+		// to re-send events (especially UpgradedControlPlane). The annotation is cleared
+		// at the START of a new upgrade instead (see line ~247 where we delete it).
 		if !isUpgrading {
-			delete(c.Annotations, EmittedEventsAnnotation)
+			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
+			delete(c.Annotations, UpgradeStartTimeAnnotation)
+			delete(c.Annotations, UpgradeTypeAnnotation)
+			// EmittedEventsAnnotation is cleared at the start of the NEXT upgrade, not here
 		}
 	})
 }
@@ -376,9 +737,9 @@ func (r *ClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 		).
 		Watches(
-			&capiexp.MachinePool{},
+			&capi.MachinePool{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				mp := obj.(*capiexp.MachinePool)
+				mp := obj.(*capi.MachinePool)
 				if clusterName, ok := mp.Labels[capi.ClusterNameLabel]; ok {
 					return []reconcile.Request{
 						{

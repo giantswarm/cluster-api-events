@@ -11,6 +11,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Migrate to App Build Suite (ABS) for Helm chart building.
 
+## [1.2.1] - 2026-01-22
+
+### Fixed
+
+- Fallback to `karpenter.sh/nodepool` label when checking MachinePool node versions if no nodes are found with the `giantswarm.io/machine-pool` label.
+- Consider MachinePools with 0 nodes as ready for upgrade completion. This fixes upgrades getting stuck when Karpenter NodePools have no provisioned nodes (e.g., scale-to-zero, no workloads scheduled).
+- Add pagination support when listing nodes for MachinePool version checks. Previously only the first 100 nodes were checked; now all nodes are retrieved using continue tokens.
+
+## [1.2.0] - 2026-01-22
+
+### Fixed
+
+- Fixed patch upgrades never emitting completion event. The controller was waiting for the 30-second minimum duration but never re-reconciled because all CAPI conditions were already satisfied. Now requeues after the remaining time when only waiting for minimum duration.
+
+### Changed
+
+- Skip `UpgradedControlPlane` event for patch upgrades since control plane machines don't roll. Patch upgrades now emit only the start event (`UpgradingWithoutNodeRoll`) and completion event (`Upgraded`), providing a cleaner notification flow for customers.
+
+### Added
+
+- Store upgrade type (`patch`, `minor`, `major`) in cluster annotation `giantswarm.io/upgrade-type` for tracking during upgrade lifecycle.
+
+## [1.1.0] - 2026-01-21
+
+### Fixed
+
+- Fixed missing notification when upgrade target changes mid-upgrade. Previously, if the release version label was changed while an upgrade was already in progress (e.g., changing target from 32.2.0 to 33.1.3 while upgrading from 31.0.0), no notification would be sent. Now emits a new "Upgrading" event with "(upgrade target updated)" in the message, and resets tracking so control plane completion is re-sent for the new target.
+
+### Changed
+
+- Changed upgrade event types to indicate whether nodes will be replaced based on semver comparison:
+  - `UpgradingWithNodeRoll` for minor/major upgrades (nodes will be replaced)
+  - `UpgradingWithoutNodeRoll` for patch upgrades (nodes unlikely to be replaced)
+- Updated copyright year to 2026.
+
+## [1.0.7] - 2026-01-20
+
+### Fixed
+
+- Fixed duplicate "Control plane upgrade completed" events being sent at the same time as upgrade completion. The `EmittedEventsAnnotation` was being deleted when the upgrade completed, allowing concurrent reconciles to re-send the control plane event.
+- Added atomic claim-and-emit pattern for event emission to prevent race conditions where multiple concurrent reconciles could send the same event before either updates the annotation.
+
+## [1.0.6] - 2026-01-17
+
+### Fixed
+
+- **Critical**: Fixed externally-managed MachinePools (Cluster Autoscaler, Karpenter, etc.) being skipped entirely from workload cluster node version checks. Previously, MachinePools with `cluster.x-k8s.io/replicas-managed-by: external-autoscaler` annotation were completely skipped, causing premature upgrade completion events. Now performs workload cluster node version verification for ALL MachinePools (including externally-managed ones), while skipping only the unreliable CAPI status checks for externally-managed pools.
+
+## [1.0.5] - 2026-01-17
+
+### Fixed
+
+- **Critical**: Fixed fallback when workload cluster connection fails for MachinePools. Previously, if the controller couldn't connect to the workload cluster to verify node versions, it would fall back to trusting `upToDateReplicas` which has the same problem as CAPI conditions. Now marks the MachinePool as not ready when workload cluster is inaccessible.
+- **Critical**: Fixed empty node list returning "all nodes ready". If no nodes are found with the MachinePool label selector (due to label mismatch, RBAC issues, or nodes not yet provisioned), the controller now conservatively marks the MachinePool as not ready instead of incorrectly reporting success.
+- Added extensive logging for workload cluster node version checks to help diagnose issues.
+
+## [1.0.4] - 2026-01-17
+
+### Fixed
+
+- **Critical**: Fixed premature upgrade completion events for MachinePools. CAPI conditions (`WorkerMachinesUpToDate`) can report `True` based on ASG/Launch Template state while actual nodes in the workload cluster are still being replaced. Now ALWAYS verifies actual workload cluster node versions instead of trusting CAPI conditions.
+
+## [1.0.3] - 2026-01-17
+
+### Fixed
+
+- Fixed new cluster creation triggering false "Upgrading" events with empty "from version". Now only sends upgrade events when there is a valid previous version.
+- Fixed duplicate completion events being sent by concurrent reconciles. Now tracks "Upgraded" event in annotations to prevent race conditions.
+- Fixed potential duplicate "Upgrading" events from concurrent reconciles by refetching cluster state before sending event.
+
+## [1.0.2] - 2026-01-16
+
+### Fixed
+
+- Fixed race condition where upgrade completion events were sent immediately after upgrade started, before CAPI had time to update conditions. Added minimum upgrade duration check (30 seconds) and new `giantswarm.io/upgrade-start-time` annotation to track actual upgrade start time.
+- Handle missing `giantswarm.io/upgrade-start-time` annotation for existing upgrades (started before this fix was deployed or after controller restart) by falling back to `lastKnownTransitionTime` or setting it to current time.
+
+## [1.0.1] - 2026-01-16
+
+### Fixed
+
+- Fixed MachinePools always being reported as "not ready" in CAPI v1beta2 because `Available`/`Ready` conditions are no longer in `status.conditions` (moved to `status.deprecated.v1beta1.conditions`). Now uses `status.phase` for MachinePool readiness checks.
+- Fixed clusters getting stuck in "upgrading" state forever because `timeProgressed` check required the `AvailableCondition.lastTransitionTime` to change, but clusters often stay Available throughout upgrades. Replaced with `RollingOut: False` condition check.
+- Fixed upgrade completion detection by using Cluster-level v1beta2 conditions (`WorkerMachinesReady`, `WorkerMachinesUpToDate`) as primary source instead of checking individual MachinePool conditions.
+- Skip Karpenter-managed MachinePools (annotation: `cluster.x-k8s.io/replicas-managed-by: external-autoscaler`) in individual resource checks since they are externally managed; rely on Cluster-level conditions for these pools.
+
+## [1.0.0] - 2026-01-16
+
+### Changed
+
+- Switched to using `Available` condition for Cluster status checks instead of deprecated `Ready` condition, aligning with CAPI v1beta2.
+- Updated worker node readiness checks to use v1beta2 `Available` condition with fallback to v1beta1 `Ready` condition for backward compatibility.
+- Simplified MachineDeployment version checking by leveraging v1beta2 `MachinesUpToDate` condition instead of manually traversing Machine ownership chains.
+- **Kept workload cluster node version checking as primary verification method for MachinePools** (including Karpenter-managed nodes), as v1beta1 MachinePools lack `upToDateReplicas` field and Karpenter provisions nodes independently. Falls back to v1beta2 `upToDateReplicas` status field only when workload cluster is inaccessible AND field is available.
+
+### Fixed
+
+- Fixed upgrade event detection with v1beta2 to send "Upgrading" events when release version changes, regardless of `RollingOutCondition` state. The `RollingOutCondition` may not be set immediately or consistently by all infrastructure/control plane providers during version upgrades.
+- Fixed `last-known-cluster-upgrade-version` annotation not being updated when upgrade completes, which would cause incorrect version comparison on subsequent upgrades.
+- Fixed control plane upgrade event firing too early by adding check for `ControlPlaneMachinesUpToDateCondition`. Event now waits for all control plane machines to be upgraded and up-to-date.
+- Fixed worker node readiness check using deprecated v1beta1 `Ready` condition instead of v1beta2 `Available` condition for MachineDeployments and MachinePools, causing false "not ready" detection.
+- Fixed MachinePool version checking to be conservative when workload cluster is inaccessible and `upToDateReplicas` field is not available (v1beta1), preventing false "ready" reports during upgrades.
+
 ## [0.8.0] - 2025-11-20
 
 ### Added
@@ -131,7 +234,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.7...v1.1.0
+[1.0.7]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.6...v1.0.7
+[1.0.6]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.5...v1.0.6
+[1.0.5]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.4...v1.0.5
+[1.0.4]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.3...v1.0.4
+[1.0.3]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.8.0...v1.0.0
 [0.8.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/giantswarm/cluster-api-events/compare/v0.5.3...v0.6.0

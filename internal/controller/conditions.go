@@ -9,23 +9,22 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	capi "sigs.k8s.io/cluster-api/api/v1beta1"
-	capiexp "sigs.k8s.io/cluster-api/exp/api/v1beta1"
+	capi "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	capiconditions "sigs.k8s.io/cluster-api/util/conditions"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func isClusterReady(object capiconditions.Getter, condition capi.ConditionType) bool {
+func isClusterReady(object capiconditions.Getter, condition string) bool {
 	return capiconditions.IsTrue(object, condition)
 }
 
-func isClusterUpgrading(object capiconditions.Getter, condition capi.ConditionType) bool {
-	return capiconditions.IsFalse(object, condition) && capiconditions.GetReason(object, condition) == "RollingUpdateInProgress"
+func isClusterUpgrading(object capiconditions.Getter) bool {
+	return capiconditions.IsTrue(object, capi.RollingOutCondition)
 }
 
-func conditionTimeStampFromReadyState(object capiconditions.Getter, condition capi.ConditionType) (*metav1.Time, bool) {
+func conditionTimeStampFromAvailableState(object capiconditions.Getter, condition string) (*metav1.Time, bool) {
 	if isClusterReady(object, condition) {
 		time := capiconditions.GetLastTransitionTime(object, condition)
 		if time != nil {
@@ -88,49 +87,140 @@ func getWorkloadClusterClient(ctx context.Context, c client.Client, cluster *cap
 }
 
 // checkMachinePoolNodeVersions connects to workload cluster and checks node versions for a MachinePool
-func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capiexp.MachinePool, expectedVersion string) (bool, []string, error) {
-	// List nodes with minimal fields to reduce memory usage
-	nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("giantswarm.io/machine-pool=%s", mp.Name),
-		// Limit fields to only what we need to reduce memory usage
-		FieldSelector: "spec.unschedulable!=true",
-		// Limit the number of nodes returned to prevent memory issues
-		Limit: 100,
-	})
-	if err != nil {
-		return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s: %w", mp.Name, err)
+func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capi.MachinePool, expectedVersion string) (bool, []string, error) {
+	logger := log.FromContext(ctx)
+
+	// Try primary Giant Swarm label first
+	labelSelector := fmt.Sprintf("giantswarm.io/machine-pool=%s", mp.Name)
+
+	// List all nodes using pagination to handle large clusters
+	var allNodes []corev1.Node
+	continueToken := ""
+	for {
+		nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+			FieldSelector: "spec.unschedulable!=true",
+			Limit:         100,
+			Continue:      continueToken,
+		})
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s: %w", mp.Name, err)
+		}
+		allNodes = append(allNodes, nodes.Items...)
+		if nodes.Continue == "" {
+			break
+		}
+		continueToken = nodes.Continue
 	}
+
+	// If no nodes found with primary label, try Karpenter label as fallback
+	// This handles cases where Karpenter NodePools are not configured with giantswarm.io/machine-pool label
+	if len(allNodes) == 0 {
+		karpenterSelector := fmt.Sprintf("karpenter.sh/nodepool=%s", mp.Name)
+		logger.Info("No nodes found with giantswarm label, trying Karpenter label as fallback",
+			"machinePool", mp.Name,
+			"primaryLabel", labelSelector,
+			"fallbackLabel", karpenterSelector)
+
+		continueToken = ""
+		for {
+			nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+				LabelSelector: karpenterSelector,
+				FieldSelector: "spec.unschedulable!=true",
+				Limit:         100,
+				Continue:      continueToken,
+			})
+			if err != nil {
+				return false, nil, fmt.Errorf("failed to list nodes for MachinePool %s with Karpenter label: %w", mp.Name, err)
+			}
+			allNodes = append(allNodes, nodes.Items...)
+			if nodes.Continue == "" {
+				break
+			}
+			continueToken = nodes.Continue
+		}
+
+		if len(allNodes) > 0 {
+			labelSelector = karpenterSelector // Update for logging
+			logger.Info("Found nodes using Karpenter label fallback",
+				"machinePool", mp.Name,
+				"nodeCount", len(allNodes),
+				"labelSelector", karpenterSelector)
+		}
+	}
+
+	// If no nodes found with either label, return true since there are no nodes to upgrade.
+	// This handles the case where:
+	// - Karpenter NodePool has 0 nodes (no workloads scheduled, scale-to-zero, etc.)
+	// - Nodes are still being provisioned (will get new version from launch template)
+	// For externally-managed pools (Karpenter), this is expected behavior - future nodes
+	// will be provisioned with the new configuration.
+	if len(allNodes) == 0 {
+		logger.Info("No nodes found for MachinePool in workload cluster - considering ready (0 nodes = 0 nodes to upgrade)",
+			"machinePool", mp.Name,
+			"labelSelector", labelSelector,
+			"expectedVersion", expectedVersion)
+		return true, nil, nil
+	}
+
+	logger.V(1).Info("Checking node versions for MachinePool",
+		"machinePool", mp.Name,
+		"nodeCount", len(allNodes),
+		"expectedVersion", expectedVersion,
+		"labelSelector", labelSelector)
 
 	var nodesWithWrongVersion []string
 	allCorrectVersion := true
+	checkedNodeCount := 0
 
-	for _, node := range nodes.Items {
+	for _, node := range allNodes {
 		// Skip nodes being drained/cordoned (unschedulable) - should be filtered by FieldSelector but double-check
 		if node.Spec.Unschedulable {
-			log := log.FromContext(ctx)
-			log.V(1).Info("Skipping unschedulable node in MachinePool version check",
+			logger.V(1).Info("Skipping unschedulable node in MachinePool version check",
 				"machinePool", mp.Name,
 				"node", node.Name,
 				"nodeVersion", node.Status.NodeInfo.KubeletVersion)
 			continue
 		}
 
+		checkedNodeCount++
+		nodeVersion := node.Status.NodeInfo.KubeletVersion
+
 		// Check kubelet version
-		if node.Status.NodeInfo.KubeletVersion != expectedVersion {
+		if nodeVersion != expectedVersion {
 			nodesWithWrongVersion = append(nodesWithWrongVersion,
-				fmt.Sprintf("%s(%s!=%s)", node.Name, node.Status.NodeInfo.KubeletVersion, expectedVersion))
+				fmt.Sprintf("%s(%s!=%s)", node.Name, nodeVersion, expectedVersion))
 			allCorrectVersion = false
+
+			logger.Info("Node has wrong version",
+				"machinePool", mp.Name,
+				"node", node.Name,
+				"nodeVersion", nodeVersion,
+				"expectedVersion", expectedVersion)
 
 			// Limit the number of wrong version nodes we track to prevent memory bloat
 			if len(nodesWithWrongVersion) >= 10 {
-				log := log.FromContext(ctx)
-				log.V(1).Info("Truncating wrong version nodes list to prevent memory usage",
+				logger.V(1).Info("Truncating wrong version nodes list to prevent memory usage",
 					"machinePool", mp.Name,
 					"totalWrongVersionNodes", "10+")
 				break
 			}
 		}
 	}
+
+	// If all nodes were skipped (unschedulable), be conservative
+	if checkedNodeCount == 0 {
+		logger.Info("All nodes for MachinePool are unschedulable, marking as not ready",
+			"machinePool", mp.Name,
+			"totalNodes", len(allNodes))
+		return false, []string{"all nodes unschedulable"}, nil
+	}
+
+	logger.V(1).Info("MachinePool node version check complete",
+		"machinePool", mp.Name,
+		"checkedNodes", checkedNodeCount,
+		"allCorrectVersion", allCorrectVersion,
+		"nodesWithWrongVersion", nodesWithWrongVersion)
 
 	return allCorrectVersion, nodesWithWrongVersion, nil
 }
@@ -147,7 +237,14 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	var notReadyMDs []string
 	var versionMismatchMDs []string
 	for _, md := range machineDeployments.Items {
-		ready := isClusterReady(&md, capi.ReadyCondition)
+		// In v1beta2, MachineDeployments use Available condition instead of Ready
+		// Fall back to Ready condition for v1beta1 compatibility
+		ready := isClusterReady(&md, capi.AvailableCondition)
+		if !ready {
+			ready = isClusterReady(&md, capi.ReadyCondition)
+		}
+		// Check if all machines in the MachineDeployment are up-to-date (v1beta2)
+		machinesUpToDate := isClusterReady(&md, capi.MachineDeploymentMachinesUpToDateCondition)
 		// Check version match - MachineDeployment label should match cluster version
 		// This indicates the MachineDeployment is configured for the right release
 		versionMatch := md.Labels[ReleaseVersionLabel] == cluster.Labels[ReleaseVersionLabel]
@@ -157,98 +254,37 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			desiredReplicas = *md.Spec.Replicas
 		}
 
-		// For MachineDeployments, check both basic status and individual machine versions
-		basicRolloutComplete := desiredReplicas == md.Status.UpdatedReplicas &&
-			desiredReplicas == md.Status.ReadyReplicas &&
-			desiredReplicas == md.Status.AvailableReplicas
+		// For MachineDeployments, check both basic status and the v1beta2 MachinesUpToDate condition
+		basicRolloutComplete := desiredReplicas == *md.Status.Replicas &&
+			desiredReplicas == *md.Status.ReadyReplicas &&
+			desiredReplicas == *md.Status.AvailableReplicas
 
-		// Check individual machines for version consistency (MachineDeployments create Machine resources)
-		allMachinesCorrectVersion := true
-		var expectedVersion string
-		if md.Spec.Template.Spec.Version != nil {
-			expectedVersion = *md.Spec.Template.Spec.Version
-		} else {
-			expectedVersion = cluster.Labels[ReleaseVersionLabel]
-		}
-
-		machines := &capi.MachineList{}
-		if err := c.List(ctx, machines, client.InNamespace(cluster.Namespace), client.MatchingLabels{
-			capi.ClusterNameLabel: cluster.Name,
-		}); err != nil {
-			log := log.FromContext(ctx)
-			log.Error(err, "Failed to list machines for MachineDeployment", "machineDeployment", md.Name)
-			allMachinesCorrectVersion = false
-		} else {
-			var machinesWithWrongVersion []string
-
-			// Filter machines belonging to this MachineDeployment
-			for _, machine := range machines.Items {
-				// Check if machine belongs to this MachineDeployment via OwnerReferences
-				belongsToMD := false
-				for _, ownerRef := range machine.OwnerReferences {
-					if ownerRef.Kind == "MachineSet" {
-						// Get the MachineSet to check if it belongs to our MachineDeployment
-						machineSet := &capi.MachineSet{}
-						if err := c.Get(ctx, client.ObjectKey{
-							Namespace: machine.Namespace,
-							Name:      ownerRef.Name,
-						}, machineSet); err == nil {
-							for _, msOwnerRef := range machineSet.OwnerReferences {
-								if msOwnerRef.Kind == "MachineDeployment" && msOwnerRef.Name == md.Name {
-									belongsToMD = true
-									break
-								}
-							}
-						}
-						break
-					}
-				}
-
-				if !belongsToMD {
-					continue
-				}
-
-				// Skip machines being deleted
-				if !machine.DeletionTimestamp.IsZero() {
-					continue
-				}
-
-				// Check machine version
-				if machine.Spec.Version != nil && *machine.Spec.Version != expectedVersion {
-					machinesWithWrongVersion = append(machinesWithWrongVersion,
-						fmt.Sprintf("%s(%s!=%s)", machine.Name, *machine.Spec.Version, expectedVersion))
-					allMachinesCorrectVersion = false
-				}
-			}
-
-			if len(machinesWithWrongVersion) > 0 {
-				log := log.FromContext(ctx)
-				log.V(1).Info("MachineDeployment has machines with incorrect versions",
-					"machineDeployment", md.Name,
-					"expectedVersion", expectedVersion,
-					"machinesWithWrongVersion", machinesWithWrongVersion)
-			}
-		}
-
-		rolloutComplete := basicRolloutComplete && allMachinesCorrectVersion
+		// In v1beta2, use the MachinesUpToDate condition which is maintained by CAPI
+		// This is more reliable than checking individual machines
+		rolloutComplete := basicRolloutComplete && machinesUpToDate
 
 		log := log.FromContext(ctx)
 		log.V(1).Info("Checking MachineDeployment status",
 			"name", md.Name,
 			"ready", ready,
+			"machinesUpToDate", machinesUpToDate,
 			"basicRolloutComplete", basicRolloutComplete,
-			"allMachinesCorrectVersion", allMachinesCorrectVersion,
 			"rolloutComplete", rolloutComplete,
 			"versionMatch", versionMatch,
 			"desiredReplicas", desiredReplicas,
-			"updatedReplicas", md.Status.UpdatedReplicas,
-			"readyReplicas", md.Status.ReadyReplicas,
-			"availableReplicas", md.Status.AvailableReplicas,
-			"expectedVersion", expectedVersion,
+			"replicas", md.Status.Replicas,
+			"readyReplicas", *md.Status.ReadyReplicas,
+			"availableReplicas", *md.Status.AvailableReplicas,
 			"mdVersion", md.Labels[ReleaseVersionLabel],
 			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
-			"readyCondition", func() string {
-				if condition := capiconditions.Get(&md, capi.ReadyCondition); condition != nil {
+			"availableCondition", func() string {
+				if condition := capiconditions.Get(&md, capi.AvailableCondition); condition != nil {
+					return fmt.Sprintf("status=%s,reason=%s", condition.Status, condition.Reason)
+				}
+				return "missing"
+			}(),
+			"machinesUpToDateCondition", func() string {
+				if condition := capiconditions.Get(&md, capi.MachineDeploymentMachinesUpToDateCondition); condition != nil {
 					return fmt.Sprintf("status=%s,reason=%s", condition.Status, condition.Reason)
 				}
 				return "missing"
@@ -267,55 +303,48 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 		}
 	}
 
-	machinePools := &capiexp.MachinePoolList{}
+	machinePools := &capi.MachinePoolList{}
 	if err := c.List(ctx, machinePools, client.InNamespace(cluster.Namespace), client.MatchingLabels{
 		capi.ClusterNameLabel: cluster.Name,
 	}); err != nil {
 		return false, err
 	}
 
-	// Get workload cluster client for MachinePool node version checking
+	// Get workload cluster client to check for non-CAPI managed nodes (e.g., Karpenter)
+	// This is a supplementary check - the primary check is CAPI conditions
 	var workloadClient kubernetes.Interface
 	var workloadClientErr error
-	var isManagementCluster bool
-
-	// Only try to connect if we have MachinePools to check
-	if len(machinePools.Items) > 0 {
+	if len(machinePools.Items) > 0 || cluster.Status.ControlPlane != nil {
 		workloadClient, workloadClientErr = getWorkloadClusterClient(ctx, c, cluster)
 		if workloadClientErr != nil {
-			// Check if this is a management cluster self-reference
-			if workloadClientErr.Error() == "management cluster self-reference detected - skipping to prevent self-connection" {
-				// For management cluster, create client from current config
-				currentConfig := ctrl.GetConfigOrDie()
-				clientset, err := kubernetes.NewForConfig(currentConfig)
-				if err != nil {
-					log := log.FromContext(ctx)
-					log.V(1).Info("Failed to create management cluster client, falling back to basic MachinePool checking",
-						"cluster", cluster.Name,
-						"error", err)
-					workloadClient = nil
-				} else {
-					workloadClient = clientset
-					isManagementCluster = true
-					log := log.FromContext(ctx)
-					log.V(1).Info("Using management cluster client for node version checking",
-						"cluster", cluster.Name)
-				}
-			} else {
-				log := log.FromContext(ctx)
-				log.V(1).Info("Failed to get workload cluster client, falling back to basic MachinePool checking",
-					"cluster", cluster.Name,
-					"error", workloadClientErr)
-				// Set to nil to ensure fallback behavior
-				workloadClient = nil
-			}
+			log := log.FromContext(ctx)
+			log.V(1).Info("Failed to get workload cluster client, will rely on CAPI status only",
+				"cluster", cluster.Name,
+				"error", workloadClientErr)
+			workloadClient = nil
 		}
 	}
 
 	var notReadyMPs []string
 	var versionMismatchMPs []string
 	for _, mp := range machinePools.Items {
-		ready := isClusterReady(&mp, capi.ReadyCondition)
+		logger := log.FromContext(ctx)
+
+		// Check if this MachinePool is managed by an external autoscaler (Cluster Autoscaler, Karpenter, etc.)
+		// See: https://cluster-api.sigs.k8s.io/developer/architecture/controllers/machine-pool#primitives
+		isExternallyManaged := mp.Annotations["cluster.x-k8s.io/replicas-managed-by"] == "external-autoscaler"
+
+		// In v1beta2, MachinePools don't have Available/Ready conditions in status.conditions
+		// (they only have Paused). The old conditions are in status.deprecated.v1beta1.conditions.
+		// Instead, we check status fields directly which are reliable:
+		// - status.replicas, status.readyReplicas, status.availableReplicas
+		// - status.phase indicates the overall MachinePool state
+		phase := capi.MachinePoolPhase(mp.Status.Phase)
+		ready := phase == capi.MachinePoolPhaseRunning ||
+			phase == capi.MachinePoolPhaseScaling ||
+			phase == capi.MachinePoolPhaseScalingUp ||
+			phase == capi.MachinePoolPhaseScalingDown
+
 		// Check version match - MachinePool label should match cluster version
 		// Note: mp.Spec.Template.Spec.Version uses Kubernetes version format (v1.31.9)
 		// while labels use release version format (31.0.0), so we can't compare them directly
@@ -326,92 +355,133 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			desiredReplicas = *mp.Spec.Replicas
 		}
 
-		// Check basic readiness first
-		basicRolloutComplete := desiredReplicas == mp.Status.ReadyReplicas &&
-			desiredReplicas == mp.Status.AvailableReplicas
+		// Check basic readiness - in v1beta2, upToDateReplicas should be available in status
+		basicRolloutComplete := desiredReplicas == *mp.Status.ReadyReplicas &&
+			desiredReplicas == *mp.Status.AvailableReplicas
 
+		// For MachinePools, we MUST verify actual node versions in workload cluster
+		// This is critical because:
+		// 1. v1beta1 MachinePools don't have upToDateReplicas field
+		// 2. Karpenter provisions nodes independently from CAPI
+		// 3. Status fields might not reflect actual node versions
 		var expectedVersion string
-		if mp.Spec.Template.Spec.Version != nil {
-			expectedVersion = *mp.Spec.Template.Spec.Version
+		if mp.Spec.Template.Spec.Version != "" {
+			expectedVersion = mp.Spec.Template.Spec.Version
 		} else {
 			expectedVersion = cluster.Labels[ReleaseVersionLabel]
 		}
 
-		// Try to check actual node versions in workload cluster or management cluster
 		allNodesCorrectVersion := true
 		var nodesWithWrongVersion []string
+		nodeVersionCheckPerformed := false
 
 		if workloadClient != nil {
 			var err error
 			allNodesCorrectVersion, nodesWithWrongVersion, err = checkMachinePoolNodeVersions(ctx, workloadClient, &mp, expectedVersion)
 			if err != nil {
 				log := log.FromContext(ctx)
-				if isManagementCluster {
-					log.V(1).Info("Failed to check node versions in management cluster for MachinePool",
-						"machinePool", mp.Name,
-						"error", err)
-				} else {
-					log.V(1).Info("Failed to check node versions in workload cluster for MachinePool",
-						"machinePool", mp.Name,
-						"error", err)
-				}
-				// Fall back to basic checking if node access fails
-				allNodesCorrectVersion = true
+				log.V(1).Info("Failed to check node versions in workload cluster for MachinePool",
+					"machinePool", mp.Name,
+					"error", err)
+				nodeVersionCheckPerformed = false
+			} else {
+				nodeVersionCheckPerformed = true
 			}
 		}
 
-		rolloutComplete := basicRolloutComplete && allNodesCorrectVersion
+		// If workload cluster check was not performed (client unavailable or error),
+		// we CANNOT trust upToDateReplicas because it reports based on ASG/Launch Template
+		// state, not actual node versions. Be conservative and mark as not ready.
+		if !nodeVersionCheckPerformed {
+			// CRITICAL: Don't trust upToDateReplicas - it has the same problem as CAPI conditions!
+			// The ASG can report "up-to-date" before nodes are actually replaced.
+			allNodesCorrectVersion = false
+			log := log.FromContext(ctx)
+			log.Info("Cannot verify MachinePool node versions - workload cluster inaccessible, marking as not ready",
+				"machinePool", mp.Name,
+				"workloadClientError", workloadClientErr,
+				"upToDateReplicas", func() string {
+					if mp.Status.UpToDateReplicas != nil {
+						return fmt.Sprintf("%d", *mp.Status.UpToDateReplicas)
+					}
+					return "nil"
+				}())
+		}
 
-		log := log.FromContext(ctx)
-		logLevel := log.V(1)
+		// For externally-managed MachinePools (Cluster Autoscaler, Karpenter, etc.),
+		// ONLY use workload cluster check. CAPI status (replicas, phase) is unreliable
+		// for pools managed by external autoscalers.
+		// For regular MachinePools, use both CAPI status AND workload cluster check.
+		var rolloutComplete bool
+		if isExternallyManaged {
+			// External autoscaler: ONLY trust actual workload cluster node versions
+			rolloutComplete = allNodesCorrectVersion
+			logger.Info("Externally-managed MachinePool - using workload cluster check only",
+				"machinePool", mp.Name,
+				"allNodesCorrectVersion", allNodesCorrectVersion,
+				"nodeVersionCheckPerformed", nodeVersionCheckPerformed,
+				"nodesWithWrongVersion", nodesWithWrongVersion)
+		} else {
+			// Regular: use both CAPI status AND workload cluster check
+			rolloutComplete = basicRolloutComplete && allNodesCorrectVersion
+		}
+
+		logLevel := logger.V(1)
 
 		logFields := []interface{}{
 			"name", mp.Name,
+			"isExternallyManaged", isExternallyManaged,
 			"ready", ready,
+			"allNodesCorrectVersion", allNodesCorrectVersion,
+			"nodeVersionCheckPerformed", nodeVersionCheckPerformed,
 			"basicRolloutComplete", basicRolloutComplete,
 			"rolloutComplete", rolloutComplete,
 			"versionMatch", versionMatch,
 			"desiredReplicas", desiredReplicas,
-			"readyReplicas", mp.Status.ReadyReplicas,
-			"availableReplicas", mp.Status.AvailableReplicas,
-			"nodeRefsCount", len(mp.Status.NodeRefs),
+			"readyReplicas", *mp.Status.ReadyReplicas,
+			"availableReplicas", *mp.Status.AvailableReplicas,
 			"expectedVersion", expectedVersion,
 			"mpLabelVersion", mp.Labels[ReleaseVersionLabel],
 			"clusterVersion", cluster.Labels[ReleaseVersionLabel],
-			"readyCondition", func() string {
-				if condition := capiconditions.Get(&mp, capi.ReadyCondition); condition != nil {
+			"availableCondition", func() string {
+				if condition := capiconditions.Get(&mp, capi.AvailableCondition); condition != nil {
 					return fmt.Sprintf("status=%s,reason=%s", condition.Status, condition.Reason)
 				}
 				return "missing"
 			}(),
 		}
 
-		if workloadClient != nil {
-			logFields = append(logFields,
-				"allNodesCorrectVersion", allNodesCorrectVersion)
-			if isManagementCluster {
-				logFields = append(logFields, "clusterAccess", "management cluster (current)")
-			} else {
-				logFields = append(logFields, "workloadClusterAccess", "successful")
-			}
+		// Add upToDateReplicas info if available (v1beta2 only)
+		if mp.Status.UpToDateReplicas != nil {
+			logFields = append(logFields, "upToDateReplicas", *mp.Status.UpToDateReplicas)
+		} else {
+			logFields = append(logFields, "upToDateReplicas", "not available (v1beta1?)")
+		}
+
+		// Add workload cluster check info
+		if nodeVersionCheckPerformed {
+			logFields = append(logFields, "workloadClusterCheck", "successful")
 			if len(nodesWithWrongVersion) > 0 {
 				logFields = append(logFields, "nodesWithWrongVersion", nodesWithWrongVersion)
 			}
+		} else if workloadClient != nil {
+			logFields = append(logFields, "workloadClusterCheck", "failed")
 		} else {
-			if isManagementCluster {
-				logFields = append(logFields,
-					"clusterAccess", "management cluster failed",
-					"fallbackMode", "basic status checking only")
-			} else {
-				logFields = append(logFields,
-					"workloadClusterAccess", "failed",
-					"fallbackMode", "basic status checking only")
-			}
+			logFields = append(logFields, "workloadClusterCheck", "client not available")
 		}
 
 		logLevel.Info("Checking MachinePool status", logFields...)
 
-		if !ready || !rolloutComplete {
+		// For externally-managed pools: only check workload cluster result (skip CAPI ready check)
+		// For regular pools: check both ready and rolloutComplete
+		var isNotReady bool
+		if isExternallyManaged {
+			isNotReady = !rolloutComplete
+		} else {
+			isNotReady = !ready || !rolloutComplete
+		}
+
+		if isNotReady {
 			notReadyMPs = append(notReadyMPs, mp.Name)
 		}
 
@@ -437,12 +507,6 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 			"versionMismatchMachinePools", versionMismatchMPs,
 		}
 
-		if workloadClient != nil && workloadClientErr == nil {
-			logFields = append(logFields, "machinePoolVersionChecking", "workload cluster node inspection")
-		} else {
-			logFields = append(logFields, "machinePoolVersionChecking", "basic status only (workload cluster access failed)")
-		}
-
 		log.Info("Worker nodes not all ready", logFields...)
 	}
 
@@ -460,12 +524,12 @@ func areAnyWorkerNodesUpgrading(ctx context.Context, c client.Client, cluster *c
 
 	var upgradingMDs []string
 	for _, md := range machineDeployments.Items {
-		if isClusterUpgrading(&md, capi.ReadyCondition) {
+		if isClusterUpgrading(&md) {
 			upgradingMDs = append(upgradingMDs, md.Name)
 		}
 	}
 
-	machinePools := &capiexp.MachinePoolList{}
+	machinePools := &capi.MachinePoolList{}
 	if err := c.List(ctx, machinePools, client.InNamespace(cluster.Namespace), client.MatchingLabels{
 		capi.ClusterNameLabel: cluster.Name,
 	}); err != nil {
@@ -474,7 +538,7 @@ func areAnyWorkerNodesUpgrading(ctx context.Context, c client.Client, cluster *c
 
 	var upgradingMPs []string
 	for _, mp := range machinePools.Items {
-		if isClusterUpgrading(&mp, capi.ReadyCondition) {
+		if isClusterUpgrading(&mp) {
 			upgradingMPs = append(upgradingMPs, mp.Name)
 		}
 	}
