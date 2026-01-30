@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-01-30
+
+### Changed
+
+- Build with up-to-date pipelines.
+
 ## [1.2.1] - 2026-01-22
 
 ### Fixed
@@ -230,7 +236,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.0.7...v1.1.0
