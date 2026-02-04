@@ -1,2 +1,5 @@
 # pkg:golang/golang.org/x/net@v0.41.0
 CVE-2025-4673
+
+# pkg:golang/go.opentelemetry.io/otel/sdk@v1.36.0
+CVE-2026-24051
