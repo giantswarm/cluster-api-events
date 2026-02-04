@@ -1,8 +1,8 @@
 apiVersion: v2
 
 name: cluster-api-events
-appVersion: 0.8.0-dev
-version: 0.8.0-dev
+appVersion: 1.2.2-dev
+version: 1.2.2-dev
 
 description: Operator for sending cluster events.
 
