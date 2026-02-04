@@ -1,14 +1,10 @@
 name: cluster-api-events
 serviceType: managed
 
-project:
-  branch: "[[ .Branch ]]"
-  commit: "[[ .SHA ]]"
-
 image:
   registry: gsoci.azurecr.io
   name: giantswarm/cluster-api-events
-  tag: "[[ .Version ]]"
+  tag: ""
   pullPolicy: IfNotPresent
 
 pod:
@@ -31,6 +27,7 @@ securityContext:
   capabilities:
     drop:
       - ALL
+  readOnlyRootFilesystem: true
 
 # Vertical Pod Autoscaler configuration
 verticalPodAutoscaler:

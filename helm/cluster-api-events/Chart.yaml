@@ -1,12 +1,14 @@
 apiVersion: v2
 
 name: cluster-api-events
-appVersion: "[[ .AppVersion ]]"
-version: "[[ .Version ]]"
+appVersion: 1.2.2-dev
+version: 1.2.2-dev
 
 description: Operator for sending cluster events.
 
 home: https://github.com/giantswarm/cluster-api-events
+icon: https://s.giantswarm.io/app-icons/giantswarm/1/dark.svg
 annotations:
-  application.giantswarm.io/team: turtles
+  application.giantswarm.io/team: tenet
+  io.giantswarm.application.team: tenet
   config.giantswarm.io/version: 1.x.x
