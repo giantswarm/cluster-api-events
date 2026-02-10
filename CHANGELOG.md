@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-02-10
+
 ### Fixed
 
 - Add workload cluster node version checks for MachineDeployments. Previously only CAPI conditions were used, which lag behind actual node upgrades, causing upgrade events to fire prematurely.
@@ -244,7 +246,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.3...HEAD
+[1.2.3]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.1.0...v1.2.0
