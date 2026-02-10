@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-02-10
+
 ### Fixed
 
 - Add workload cluster node version checks for Control Plane. The `UpgradedControlPlane` event could fire prematurely because CAPI's `controlPlaneUpToDate` condition lags behind actual node state. Now verifies kubelet versions on CP nodes before emitting the event.
@@ -250,7 +252,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.3...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.4...HEAD
+[1.2.4]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.0...v1.2.1
