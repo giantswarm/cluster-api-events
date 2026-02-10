@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.6] - 2026-02-10
+
 ### Fixed
 
 - Fix CP version check: require that at least one CP Machine was created after the upgrade started before considering the control plane upgraded. Previously, the check passed when KCP hadn't started rolling yet because all old machines matched their own spec versions.
@@ -262,7 +264,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.5...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.6...HEAD
+[1.2.6]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.2...v1.2.3
