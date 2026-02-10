@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Add workload cluster node version checks for Control Plane. The `UpgradedControlPlane` event could fire prematurely because CAPI's `controlPlaneUpToDate` condition lags behind actual node state. Now verifies kubelet versions on CP nodes before emitting the event.
+
 ## [1.2.3] - 2026-02-10
 
 ### Fixed
 
 - Add workload cluster node version checks for MachineDeployments. Previously only CAPI conditions were used, which lag behind actual node upgrades, causing upgrade events to fire prematurely.
-- Add workload cluster node version checks for Control Plane. The `UpgradedControlPlane` event could fire prematurely because CAPI's `controlPlaneUpToDate` condition lags behind actual node state. Now verifies kubelet versions on CP nodes before emitting the event.
 
 ### Changed
 
