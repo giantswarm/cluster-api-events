@@ -404,6 +404,44 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				return ctrl.Result{}, microerror.Mask(err)
 			}
 
+			// Check actual control plane node versions in the workload cluster
+			// CAPI controlPlaneUpToDate condition can lag behind actual state,
+			// so we verify kubelet versions on CP nodes directly.
+			allCPNodesCorrectVersion := false
+			cpNodeVersionCheckPerformed := false
+			cpExpectedVersion := ""
+			var cpNodesWithWrongVersion []string
+
+			cpWorkloadClient, cpWorkloadClientErr := getWorkloadClusterClient(ctx, r.Client, cluster)
+			if cpWorkloadClientErr != nil {
+				log.V(1).Info("Failed to get workload cluster client for CP version check, will be conservative",
+					"cluster", cluster.Name,
+					"error", cpWorkloadClientErr)
+			} else {
+				var versionErr error
+				cpExpectedVersion, versionErr = getExpectedCPVersion(ctx, r.Client, cluster)
+				if versionErr != nil {
+					log.V(1).Info("Failed to determine expected CP version, will be conservative",
+						"cluster", cluster.Name,
+						"error", versionErr)
+				} else {
+					var checkErr error
+					allCPNodesCorrectVersion, cpNodesWithWrongVersion, checkErr = checkControlPlaneNodeVersions(ctx, r.Client, cpWorkloadClient, cluster, cpExpectedVersion)
+					if checkErr != nil {
+						log.V(1).Info("Failed to check CP node versions in workload cluster, will be conservative",
+							"cluster", cluster.Name,
+							"error", checkErr)
+					} else {
+						cpNodeVersionCheckPerformed = true
+					}
+				}
+			}
+
+			// If workload cluster check was not performed, be conservative
+			if !cpNodeVersionCheckPerformed {
+				allCPNodesCorrectVersion = false
+			}
+
 			// Time progressed check is only used for duration calculation now
 			// We no longer require it for completion since clusters may stay Available throughout upgrade
 			timeProgressed := readyTransitionTime.After(lastKnownTransitionTime)
@@ -411,6 +449,10 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			log.Info("Upgrade in progress - checking completion criteria",
 				"controlPlaneReady", controlPlaneReady,
 				"controlPlaneUpToDate", controlPlaneUpToDate,
+				"allCPNodesCorrectVersion", allCPNodesCorrectVersion,
+				"cpNodeVersionCheckPerformed", cpNodeVersionCheckPerformed,
+				"cpExpectedVersion", cpExpectedVersion,
+				"cpNodesWithWrongVersion", cpNodesWithWrongVersion,
 				"workerMachinesReady", workerMachinesReady,
 				"workerMachinesUpToDate", workerMachinesUpToDate,
 				"clusterNotRollingOut", clusterNotRollingOut,
@@ -430,10 +472,12 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Skip UpgradedControlPlane event for patch upgrades since control plane machines don't roll
 			isPatchUpgrade := cluster.Annotations[UpgradeTypeAnnotation] == "patch"
 
-			// Control plane is done when it's ready, up-to-date, versions match, AND minimum duration has passed
-			// The minimum duration check prevents race conditions where CAPI hasn't updated conditions yet
+			// Control plane is done when it's ready, up-to-date, all CP nodes have correct version,
+			// versions match, AND minimum duration has passed.
+			// The allCPNodesCorrectVersion check prevents premature firing when CAPI reports
+			// controlPlaneUpToDate=true before actual node replacement is complete.
 			// Skip this event for patch upgrades since CP machines don't actually roll
-			if controlPlaneReady && controlPlaneUpToDate && versionsMatch && minDurationPassed && !controlPlaneEventSent && !isPatchUpgrade {
+			if controlPlaneReady && controlPlaneUpToDate && allCPNodesCorrectVersion && versionsMatch && minDurationPassed && !controlPlaneEventSent && !isPatchUpgrade {
 				// Try to atomically claim the event by updating annotation first
 				// This prevents race conditions where multiple reconciles send duplicate events
 				eventClaimed := false
@@ -458,13 +502,14 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}
 
 			// Upgrade is complete when:
-			// 1. Control plane is ready and up-to-date
+			// 1. Control plane is ready, up-to-date, and all CP nodes have correct version
 			// 2. All worker nodes are ready and up-to-date
 			// 3. Cluster is not rolling out (no active upgrade in progress)
 			// 4. Versions match
 			// 5. Minimum upgrade duration has passed (prevents race conditions with CAPI condition updates)
 			sendUpgradeEvent := controlPlaneReady &&
 				controlPlaneUpToDate &&
+				allCPNodesCorrectVersion &&
 				allWorkerNodesReady &&
 				clusterNotRollingOut &&
 				versionsMatch &&
@@ -528,6 +573,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				if !controlPlaneUpToDate {
 					reasons = append(reasons, "control plane not up-to-date")
 				}
+				if !allCPNodesCorrectVersion {
+					reasons = append(reasons, "control plane nodes not all at correct version")
+				}
 				if !allWorkerNodesReady {
 					reasons = append(reasons, "worker nodes not ready")
 				}
@@ -547,7 +595,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				// patch upgrades where conditions are satisfied immediately and no
 				// other changes trigger a reconcile.
 				allOtherConditionsMet := controlPlaneReady && controlPlaneUpToDate &&
-					allWorkerNodesReady && clusterNotRollingOut && versionsMatch
+					allCPNodesCorrectVersion && allWorkerNodesReady && clusterNotRollingOut && versionsMatch
 				if allOtherConditionsMet && !minDurationPassed && !upgradeStartTime.IsZero() {
 					elapsed := time.Since(upgradeStartTime)
 					remaining := MinUpgradeDuration - elapsed
