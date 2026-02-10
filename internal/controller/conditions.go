@@ -330,6 +330,149 @@ func checkMachineDeploymentNodeVersions(ctx context.Context, mgmtClient client.C
 	return allCorrectVersion, nodesWithWrongVersion, nil
 }
 
+// checkControlPlaneNodeVersions connects to the workload cluster and checks node versions for control plane machines.
+// It lists Machine objects in the management cluster belonging to the cluster's control plane, then for each Machine
+// with a NodeRef, gets the corresponding node from the workload cluster and checks its kubelet version.
+// The expectedVersion is determined from the newest CP machine's Spec.Version (the target the KCP is rolling toward).
+func checkControlPlaneNodeVersions(ctx context.Context, mgmtClient client.Client, workloadClient kubernetes.Interface, cluster *capi.Cluster, expectedVersion string) (bool, []string, error) {
+	logger := log.FromContext(ctx)
+
+	// List Machine objects in the management cluster belonging to this cluster's control plane.
+	// Uses MachineControlPlaneLabel (cluster.x-k8s.io/control-plane) which is the classic boolean
+	// label set by KCP on all control plane machines. MachineControlPlaneNameLabel is newer and
+	// may not be present on all providers/versions.
+	machines := &capi.MachineList{}
+	if err := mgmtClient.List(ctx, machines,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels{
+			capi.ClusterNameLabel: cluster.Name,
+		},
+		client.HasLabels{capi.MachineControlPlaneLabel},
+	); err != nil {
+		return false, nil, fmt.Errorf("failed to list control plane Machines for cluster %s: %w", cluster.Name, err)
+	}
+
+	if len(machines.Items) == 0 {
+		logger.Info("No control plane Machines found - considering ready (0 machines = 0 nodes to check)",
+			"cluster", cluster.Name,
+			"expectedVersion", expectedVersion)
+		return true, nil, nil
+	}
+
+	logger.V(1).Info("Checking node versions for control plane",
+		"cluster", cluster.Name,
+		"machineCount", len(machines.Items),
+		"expectedVersion", expectedVersion)
+
+	var nodesWithWrongVersion []string
+	allCorrectVersion := true
+	checkedNodeCount := 0
+	provisioningCount := 0
+
+	for _, machine := range machines.Items {
+		// Skip machines without a NodeRef (still provisioning)
+		if machine.Status.NodeRef.Name == "" {
+			provisioningCount++
+			logger.V(1).Info("Control plane Machine has no NodeRef yet (still provisioning)",
+				"cluster", cluster.Name,
+				"machine", machine.Name)
+			// Be conservative: a provisioning machine means rollout is not complete
+			allCorrectVersion = false
+			continue
+		}
+
+		// Get the node from the workload cluster
+		node, err := workloadClient.CoreV1().Nodes().Get(ctx, machine.Status.NodeRef.Name, metav1.GetOptions{})
+		if err != nil {
+			logger.Info("Failed to get node from workload cluster for control plane Machine",
+				"cluster", cluster.Name,
+				"machine", machine.Name,
+				"nodeName", machine.Status.NodeRef.Name,
+				"error", err)
+			// Be conservative: if we can't verify, mark as not correct
+			allCorrectVersion = false
+			continue
+		}
+
+		// Skip unschedulable nodes (being drained/cordoned)
+		if node.Spec.Unschedulable {
+			logger.V(1).Info("Skipping unschedulable node in control plane version check",
+				"cluster", cluster.Name,
+				"machine", machine.Name,
+				"node", node.Name,
+				"nodeVersion", node.Status.NodeInfo.KubeletVersion)
+			continue
+		}
+
+		checkedNodeCount++
+		nodeVersion := node.Status.NodeInfo.KubeletVersion
+
+		if nodeVersion != expectedVersion {
+			nodesWithWrongVersion = append(nodesWithWrongVersion,
+				fmt.Sprintf("%s(%s!=%s)", node.Name, nodeVersion, expectedVersion))
+			allCorrectVersion = false
+
+			logger.Info("Control plane node has wrong version",
+				"cluster", cluster.Name,
+				"machine", machine.Name,
+				"node", node.Name,
+				"nodeVersion", nodeVersion,
+				"expectedVersion", expectedVersion)
+
+			// Limit the number of wrong version nodes we track to prevent memory bloat
+			if len(nodesWithWrongVersion) >= 10 {
+				logger.V(1).Info("Truncating wrong version nodes list to prevent memory usage",
+					"cluster", cluster.Name,
+					"totalWrongVersionNodes", "10+")
+				break
+			}
+		}
+	}
+
+	logger.V(1).Info("Control plane node version check complete",
+		"cluster", cluster.Name,
+		"totalMachines", len(machines.Items),
+		"checkedNodes", checkedNodeCount,
+		"provisioningMachines", provisioningCount,
+		"allCorrectVersion", allCorrectVersion,
+		"nodesWithWrongVersion", nodesWithWrongVersion)
+
+	return allCorrectVersion, nodesWithWrongVersion, nil
+}
+
+// getExpectedCPVersion determines the expected Kubernetes version for control plane nodes
+// by finding the newest CP machine's Spec.Version (the version the KCP is rolling toward).
+func getExpectedCPVersion(ctx context.Context, mgmtClient client.Client, cluster *capi.Cluster) (string, error) {
+	machines := &capi.MachineList{}
+	if err := mgmtClient.List(ctx, machines,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels{
+			capi.ClusterNameLabel: cluster.Name,
+		},
+		client.HasLabels{capi.MachineControlPlaneLabel},
+	); err != nil {
+		return "", fmt.Errorf("failed to list control plane Machines for cluster %s: %w", cluster.Name, err)
+	}
+
+	if len(machines.Items) == 0 {
+		return "", fmt.Errorf("no control plane Machines found for cluster %s", cluster.Name)
+	}
+
+	// Find the most recently created machine — its Spec.Version is the target version
+	var newest *capi.Machine
+	for i := range machines.Items {
+		if newest == nil || machines.Items[i].CreationTimestamp.After(newest.CreationTimestamp.Time) {
+			newest = &machines.Items[i]
+		}
+	}
+
+	if newest.Spec.Version == "" {
+		return "", fmt.Errorf("newest control plane Machine %s has no Spec.Version", newest.Name)
+	}
+
+	return newest.Spec.Version, nil
+}
+
 // areAllWorkerNodesReady checks if all MachineDeployments and MachinePools are ready
 func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.Cluster) (bool, error) {
 	machineDeployments := &capi.MachineDeploymentList{}
