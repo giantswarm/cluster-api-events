@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Add workload cluster node version checks for MachineDeployments. Previously only CAPI conditions were used, which lag behind actual node upgrades, causing upgrade events to fire prematurely.
+
 ### Changed
 
 - Migrate to App Build Suite (ABS) for Helm chart building.
