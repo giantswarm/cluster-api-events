@@ -407,9 +407,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Check actual control plane node versions in the workload cluster
 			// CAPI controlPlaneUpToDate condition can lag behind actual state,
 			// so we verify kubelet versions on CP nodes directly.
+			// Each Machine's Spec.Version is compared against its node's kubelet version.
 			allCPNodesCorrectVersion := false
 			cpNodeVersionCheckPerformed := false
-			cpExpectedVersion := ""
 			var cpNodesWithWrongVersion []string
 
 			cpWorkloadClient, cpWorkloadClientErr := getWorkloadClusterClient(ctx, r.Client, cluster)
@@ -418,22 +418,14 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					"cluster", cluster.Name,
 					"error", cpWorkloadClientErr)
 			} else {
-				var versionErr error
-				cpExpectedVersion, versionErr = getExpectedCPVersion(ctx, r.Client, cluster)
-				if versionErr != nil {
-					log.V(1).Info("Failed to determine expected CP version, will be conservative",
+				var checkErr error
+				allCPNodesCorrectVersion, cpNodesWithWrongVersion, checkErr = checkControlPlaneNodeVersions(ctx, r.Client, cpWorkloadClient, cluster)
+				if checkErr != nil {
+					log.V(1).Info("Failed to check CP node versions in workload cluster, will be conservative",
 						"cluster", cluster.Name,
-						"error", versionErr)
+						"error", checkErr)
 				} else {
-					var checkErr error
-					allCPNodesCorrectVersion, cpNodesWithWrongVersion, checkErr = checkControlPlaneNodeVersions(ctx, r.Client, cpWorkloadClient, cluster, cpExpectedVersion)
-					if checkErr != nil {
-						log.V(1).Info("Failed to check CP node versions in workload cluster, will be conservative",
-							"cluster", cluster.Name,
-							"error", checkErr)
-					} else {
-						cpNodeVersionCheckPerformed = true
-					}
+					cpNodeVersionCheckPerformed = true
 				}
 			}
 
@@ -451,7 +443,6 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				"controlPlaneUpToDate", controlPlaneUpToDate,
 				"allCPNodesCorrectVersion", allCPNodesCorrectVersion,
 				"cpNodeVersionCheckPerformed", cpNodeVersionCheckPerformed,
-				"cpExpectedVersion", cpExpectedVersion,
 				"cpNodesWithWrongVersion", cpNodesWithWrongVersion,
 				"workerMachinesReady", workerMachinesReady,
 				"workerMachinesUpToDate", workerMachinesUpToDate,

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fix CP version check to compare each Machine's own `Spec.Version` against its node's kubelet version instead of deriving a single expected version from the newest Machine, which failed when KCP hadn't created the new Machine yet.
+
 ## [1.2.4] - 2026-02-10
 
 ### Fixed
