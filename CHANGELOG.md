@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fix CP version check: require that at least one CP Machine was created after the upgrade started before considering the control plane upgraded. Previously, the check passed when KCP hadn't started rolling yet because all old machines matched their own spec versions.
+
 ## [1.2.5] - 2026-02-10
 
 ### Fixed

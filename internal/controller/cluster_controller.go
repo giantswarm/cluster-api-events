@@ -419,7 +419,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					"error", cpWorkloadClientErr)
 			} else {
 				var checkErr error
-				allCPNodesCorrectVersion, cpNodesWithWrongVersion, checkErr = checkControlPlaneNodeVersions(ctx, r.Client, cpWorkloadClient, cluster)
+				allCPNodesCorrectVersion, cpNodesWithWrongVersion, checkErr = checkControlPlaneNodeVersions(ctx, r.Client, cpWorkloadClient, cluster, upgradeStartTime)
 				if checkErr != nil {
 					log.V(1).Info("Failed to check CP node versions in workload cluster, will be conservative",
 						"cluster", cluster.Name,
