@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.7] - 2026-02-11
+
 ### Changed
 
 - Remove `.podSecurityContext.runAsNonRoot` from `values.yaml` as the deployment is already setting this (and causes duplicate key error during deployment as Flux `HelmRelease`).
@@ -268,7 +270,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.6...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.7...HEAD
+[1.2.7]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.6...v1.2.7
 [1.2.6]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.3...v1.2.4
