@@ -1,7 +1,7 @@
 apiVersion: v2
 name: cluster-api-events
-appVersion: 1.2.6
-version: 1.2.6
+appVersion: 1.2.7
+version: 1.2.7
 description: Operator for sending cluster events.
 home: https://github.com/giantswarm/cluster-api-events
 icon: https://s.giantswarm.io/app-icons/giantswarm/1/dark.svg
