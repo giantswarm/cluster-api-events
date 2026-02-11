@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Remove `.podSecurityContext.runAsNonRoot` from `values.yaml` as the deployment is already setting this (and causes duplicate key error during deployment as Flux `HelmRelease`).
+
 ## [1.2.6] - 2026-02-10
 
 ### Fixed
