@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-03-17
+
 ### Added
 
 - Add `giantswarm.io/target-version` annotation to upgrade Kubernetes Events, allowing downstream consumers to group events by upgrade target.
@@ -274,7 +276,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.7...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.7...v1.3.0
 [1.2.7]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.6...v1.2.7
 [1.2.6]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.4...v1.2.5
