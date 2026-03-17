@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `giantswarm.io/target-version` annotation to upgrade Kubernetes Events, allowing downstream consumers to group events by upgrade target.
+
 ## [1.2.7] - 2026-02-11
 
 ### Changed
