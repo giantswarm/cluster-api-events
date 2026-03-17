@@ -48,8 +48,12 @@ const (
 	LastKnownUpgradeTimestampAnnotation = "giantswarm.io/last-known-cluster-upgrade-timestamp"
 	ClusterUpgradingAnnotation          = "giantswarm.io/cluster-upgrading"
 	EmittedEventsAnnotation             = "giantswarm.io/emitted-upgrade-events"
-	UpgradeStartTimeAnnotation          = "giantswarm.io/upgrade-start-time"
-	UpgradeTypeAnnotation               = "giantswarm.io/upgrade-type"
+
+	// EventAnnotationTargetVersion is added to Kubernetes Event objects to identify the target release version.
+	// This allows downstream consumers (e.g. event-exporter) to group events by upgrade target.
+	EventAnnotationTargetVersion = "giantswarm.io/target-version"
+	UpgradeStartTimeAnnotation   = "giantswarm.io/upgrade-start-time"
+	UpgradeTypeAnnotation        = "giantswarm.io/upgrade-type"
 
 	// MinUpgradeDuration is the minimum time that must pass after an upgrade starts
 	// before we consider it complete. This prevents race conditions where CAPI
@@ -250,7 +254,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		// Message indicates this is a target change, not a new upgrade
 		eventMessage := fmt.Sprintf("from release %s to %s (upgrade target updated)", previousVersion, toVersion)
-		r.Recorder.Event(cluster, "Normal", eventReason, eventMessage)
+		r.Recorder.AnnotatedEventf(cluster, map[string]string{
+			EventAnnotationTargetVersion: toVersion,
+		}, "Normal", eventReason, "%s", eventMessage)
 
 		// Update the annotation to track the new target version
 		// Keep ClusterUpgradingAnnotation as "true" since upgrade is still in progress
@@ -306,7 +312,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 			// Simple event message with version info only
 			eventMessage := fmt.Sprintf("from release %s to %s", previousVersion, toVersion)
-			r.Recorder.Event(cluster, "Normal", eventReason, eventMessage)
+			r.Recorder.AnnotatedEventf(cluster, map[string]string{
+				EventAnnotationTargetVersion: toVersion,
+			}, "Normal", eventReason, "%s", eventMessage)
 
 			// Update both version and timestamp when starting upgrade
 			err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
@@ -485,8 +493,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				} else if eventClaimed {
 					// Only send event after successfully claiming the annotation
 					log.Info("Control plane upgraded")
-					r.Recorder.Event(cluster, "Normal", "UpgradedControlPlane",
-						fmt.Sprintf("to release %s", cluster.Labels[ReleaseVersionLabel]))
+					r.Recorder.AnnotatedEventf(cluster, map[string]string{
+						EventAnnotationTargetVersion: cluster.Labels[ReleaseVersionLabel],
+					}, "Normal", "UpgradedControlPlane", "to release %s", cluster.Labels[ReleaseVersionLabel])
 				} else {
 					log.Info("Control plane event already sent by another reconcile, skipping")
 				}
@@ -539,7 +548,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					log.Info("Cluster upgrade completed successfully",
 						"version", cluster.Labels[ReleaseVersionLabel],
 						"duration", duration)
-					r.Recorder.Event(cluster, "Normal", "Upgraded", fmt.Sprintf("to release %s in %s", cluster.Labels[ReleaseVersionLabel], duration))
+					r.Recorder.AnnotatedEventf(cluster, map[string]string{
+						EventAnnotationTargetVersion: cluster.Labels[ReleaseVersionLabel],
+					}, "Normal", "Upgraded", "to release %s in %s", cluster.Labels[ReleaseVersionLabel], duration)
 				} else {
 					log.Info("Upgrade event already sent by another reconcile, skipping")
 				}
