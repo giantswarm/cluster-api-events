@@ -52,8 +52,8 @@ const (
 	// EventAnnotationTargetVersion is added to Kubernetes Event objects to identify the target release version.
 	// This allows downstream consumers (e.g. event-exporter) to group events by upgrade target.
 	EventAnnotationTargetVersion = "giantswarm.io/target-version"
-	UpgradeStartTimeAnnotation          = "giantswarm.io/upgrade-start-time"
-	UpgradeTypeAnnotation               = "giantswarm.io/upgrade-type"
+	UpgradeStartTimeAnnotation   = "giantswarm.io/upgrade-start-time"
+	UpgradeTypeAnnotation        = "giantswarm.io/upgrade-type"
 
 	// MinUpgradeDuration is the minimum time that must pass after an upgrade starts
 	// before we consider it complete. This prevents race conditions where CAPI
