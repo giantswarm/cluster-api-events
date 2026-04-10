@@ -1,3 +1,4 @@
 CVE-2026-33186 until=2026-04-19 # google.golang.org/grpc@v1.73.0
 CVE-2025-47911 until=2026-04-19 # golang.org/x/net@v0.42.0
 CVE-2025-58190 until=2026-04-19 # golang.org/x/net@v0.42.0
+CVE-2026-39883 until=2026-05-10 # go.opentelemetry.io/otel/sdk@v1.42.0
