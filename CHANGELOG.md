@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Emit `Upgraded` event for patch upgrades that don't roll the control plane. The CP node version check required at least one CP Machine created after `upgrade-start-time`, which never happens for `UpgradingWithoutNodeRoll` upgrades, so the event was never fired and downstream consumers (e.g. Slack `completionEmoji`) could not mark the upgrade complete.
+
 ## [1.3.0] - 2026-03-17
 
 ### Added

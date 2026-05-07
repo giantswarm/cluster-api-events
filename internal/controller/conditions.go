@@ -333,9 +333,11 @@ func checkMachineDeploymentNodeVersions(ctx context.Context, mgmtClient client.C
 
 // checkControlPlaneNodeVersions connects to the workload cluster and checks that each control plane
 // Machine's node has a kubelet version matching its Machine's Spec.Version.
-// It also requires that at least one CP Machine was created after upgradeStartTime, to ensure the
-// rollout has actually begun (CAPI conditions and machine specs may not be updated immediately).
-func checkControlPlaneNodeVersions(ctx context.Context, mgmtClient client.Client, workloadClient kubernetes.Interface, cluster *capi.Cluster, upgradeStartTime time.Time) (bool, []string, error) {
+// For non-patch upgrades it also requires that at least one CP Machine was created after
+// upgradeStartTime, to ensure the rollout has actually begun (CAPI conditions and machine specs
+// may not be updated immediately). Patch upgrades skip this precondition because the control
+// plane is not expected to roll, so no new Machine will ever appear.
+func checkControlPlaneNodeVersions(ctx context.Context, mgmtClient client.Client, workloadClient kubernetes.Interface, cluster *capi.Cluster, upgradeStartTime time.Time, isPatchUpgrade bool) (bool, []string, error) {
 	logger := log.FromContext(ctx)
 
 	machines := &capi.MachineList{}
@@ -355,22 +357,25 @@ func checkControlPlaneNodeVersions(ctx context.Context, mgmtClient client.Client
 		return true, nil, nil
 	}
 
-	// Check if at least one Machine was created after the upgrade started.
-	// If not, KCP hasn't started rolling yet — all machines still have the old version.
-	hasNewMachine := false
-	for _, machine := range machines.Items {
-		if machine.CreationTimestamp.Time.After(upgradeStartTime) {
-			hasNewMachine = true
-			break
+	// For minor/major upgrades, require that at least one Machine was created after the upgrade
+	// started. If not, KCP hasn't started rolling yet — all machines still have the old version.
+	// Patch upgrades don't roll the control plane, so this precondition would never be met.
+	if !isPatchUpgrade {
+		hasNewMachine := false
+		for _, machine := range machines.Items {
+			if machine.CreationTimestamp.Time.After(upgradeStartTime) {
+				hasNewMachine = true
+				break
+			}
 		}
-	}
 
-	if !hasNewMachine {
-		logger.Info("No control plane Machine created after upgrade start, rollout has not begun yet",
-			"cluster", cluster.Name,
-			"upgradeStartTime", upgradeStartTime,
-			"machineCount", len(machines.Items))
-		return false, []string{"no new machine since upgrade start"}, nil
+		if !hasNewMachine {
+			logger.Info("No control plane Machine created after upgrade start, rollout has not begun yet",
+				"cluster", cluster.Name,
+				"upgradeStartTime", upgradeStartTime,
+				"machineCount", len(machines.Items))
+			return false, []string{"no new machine since upgrade start"}, nil
+		}
 	}
 
 	logger.V(1).Info("Checking node versions for control plane",
