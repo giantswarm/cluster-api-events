@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevent premature `Upgraded` event when two releases share the same Kubernetes version (e.g. OS image-only releases on Karpenter-managed pools). Worker node completion now additionally requires each node/Machine to have been (re)created after the upgrade start time, gated by a new `giantswarm.io/upgrade-start-time-source=emit` annotation so controller restarts can't permanently silence the event.
+
 ## [1.3.1] - 2026-05-08
 
 ### Fixed

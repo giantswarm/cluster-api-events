@@ -55,6 +55,15 @@ const (
 	UpgradeStartTimeAnnotation   = "giantswarm.io/upgrade-start-time"
 	UpgradeTypeAnnotation        = "giantswarm.io/upgrade-type"
 
+	// UpgradeStartTimeSourceAnnotation records how UpgradeStartTimeAnnotation was set.
+	// "emit" means it was set at the moment we emitted the "Upgrading" event, so it
+	// reliably reflects the actual upgrade start. "synthesized" means it was set as
+	// a fallback (e.g. controller restart) and may not reflect the real start time.
+	// We use this to decide whether the per-node creation-time check is trustworthy.
+	UpgradeStartTimeSourceAnnotation = "giantswarm.io/upgrade-start-time-source"
+	UpgradeStartTimeSourceEmit       = "emit"
+	UpgradeStartTimeSourceSynth      = "synthesized"
+
 	// MinUpgradeDuration is the minimum time that must pass after an upgrade starts
 	// before we consider it complete. This prevents race conditions where CAPI
 	// conditions haven't been updated yet to reflect the upgrade in progress.
@@ -264,6 +273,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			// Reset upgrade start time since we're effectively tracking a new upgrade target
 			c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+			c.Annotations[UpgradeStartTimeSourceAnnotation] = UpgradeStartTimeSourceEmit
 			// Update upgrade type for the new target
 			c.Annotations[UpgradeTypeAnnotation] = upgradeType.String()
 			// Clear emitted events since the target changed - control plane may need to upgrade further
@@ -322,6 +332,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				c.Annotations[ClusterUpgradingAnnotation] = "true"
 				// Record wall clock time when upgrade starts - used to enforce minimum upgrade duration
 				c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+				c.Annotations[UpgradeStartTimeSourceAnnotation] = UpgradeStartTimeSourceEmit
 				// Store upgrade type for later use (to skip UpgradedControlPlane for patches)
 				c.Annotations[UpgradeTypeAnnotation] = upgradeType.String()
 				// Set timestamp to current available time to prevent it being reset
@@ -363,10 +374,19 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// CAPI conditions may not be updated immediately when upgrade starts
 			var upgradeStartTime time.Time
 			minDurationPassed := false
+			// startTimeTrustworthy indicates whether upgradeStartTime reliably reflects the
+			// actual moment the upgrade began (i.e. it was stamped during the "Upgrading"
+			// event emit). When false, callers must NOT use it to gate completion via
+			// node CreationTimestamp comparisons, because we'd otherwise wait forever for
+			// nodes that have already been provisioned.
+			startTimeTrustworthy := false
 			if startTimeStr, ok := cluster.Annotations[UpgradeStartTimeAnnotation]; ok {
 				if t, err := time.Parse(time.RFC3339, startTimeStr); err == nil {
 					upgradeStartTime = t
 					minDurationPassed = time.Since(upgradeStartTime) >= MinUpgradeDuration
+					// Trust only when the source annotation explicitly says "emit".
+					// Missing source = pre-fix upgrade in progress -> treat as synthesized.
+					startTimeTrustworthy = cluster.Annotations[UpgradeStartTimeSourceAnnotation] == UpgradeStartTimeSourceEmit
 				}
 			} else {
 				// Annotation missing - this is an upgrade that started before this fix was deployed,
@@ -380,12 +400,15 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					log.Info("Missing upgrade start time annotation, setting it now")
 					if err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
 						c.Annotations[UpgradeStartTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+						c.Annotations[UpgradeStartTimeSourceAnnotation] = UpgradeStartTimeSourceSynth
 					}); err != nil {
 						log.Error(err, "Failed to set upgrade start time annotation")
 					}
 					// Don't pass yet, wait for next reconcile
 					minDurationPassed = false
 				}
+				// Fallback path - we don't know the true upgrade start.
+				startTimeTrustworthy = false
 			}
 
 			// In v1beta2, we use Cluster-level conditions which are more reliable than checking individual MachinePool conditions
@@ -402,20 +425,28 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			workerMachinesUpToDate := isClusterReady(cluster, capi.ClusterWorkerMachinesUpToDateCondition)
 			clusterNotRollingOut := !isClusterUpgrading(cluster) // RollingOut condition is False
 
-			// ALWAYS verify actual workload cluster node versions for MachinePools
-			// CAPI conditions can report "up-to-date" based on ASG/Launch Template state,
-			// but the actual nodes in the cluster may not be replaced yet.
-			// This is critical for accurate upgrade completion detection.
-			allWorkerNodesReady, err := areAllWorkerNodesReady(ctx, r.Client, cluster)
-			if err != nil {
-				log.Error(err, "Failed to check worker node ready status")
-				return ctrl.Result{}, microerror.Mask(err)
-			}
-
 			// Patch upgrades don't roll control plane Machines (release patch typically doesn't bump
 			// the Kubernetes version), so the CP node version check must skip the "rollout has begun"
 			// precondition for them - otherwise the Upgraded event would never fire.
 			isPatchUpgrade := cluster.Annotations[UpgradeTypeAnnotation] == "patch"
+
+			// For non-patch upgrades, additionally require all worker nodes to have been
+			// (re)created after upgradeStartTime. This guards against the case where two
+			// releases share the same Kubernetes version (e.g. only OS image changes) and
+			// the kubelet version check is satisfied immediately, causing a premature
+			// "Upgraded" event. We only enforce this when upgradeStartTime is trustworthy;
+			// otherwise we'd wait forever for "newer" nodes after a controller restart.
+			enforceWorkerNodeCreationTime := !isPatchUpgrade && startTimeTrustworthy
+
+			// ALWAYS verify actual workload cluster node versions for MachinePools
+			// CAPI conditions can report "up-to-date" based on ASG/Launch Template state,
+			// but the actual nodes in the cluster may not be replaced yet.
+			// This is critical for accurate upgrade completion detection.
+			allWorkerNodesReady, err := areAllWorkerNodesReady(ctx, r.Client, cluster, upgradeStartTime, enforceWorkerNodeCreationTime)
+			if err != nil {
+				log.Error(err, "Failed to check worker node ready status")
+				return ctrl.Result{}, microerror.Mask(err)
+			}
 
 			// Check actual control plane node versions in the workload cluster
 			// CAPI controlPlaneUpToDate condition can lag behind actual state,
@@ -461,6 +492,8 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				"workerMachinesUpToDate", workerMachinesUpToDate,
 				"clusterNotRollingOut", clusterNotRollingOut,
 				"allWorkerNodesReady", allWorkerNodesReady,
+				"enforceWorkerNodeCreationTime", enforceWorkerNodeCreationTime,
+				"startTimeTrustworthy", startTimeTrustworthy,
 				"minDurationPassed", minDurationPassed,
 				"upgradeStartTime", upgradeStartTime,
 				"timeProgressed", timeProgressed,
@@ -761,6 +794,7 @@ func updateLastKnownTransitionTime(client client.Client, cluster *capi.Cluster, 
 		if !isUpgrading {
 			c.Annotations[LastKnownUpgradeVersionAnnotation] = c.Labels[ReleaseVersionLabel]
 			delete(c.Annotations, UpgradeStartTimeAnnotation)
+			delete(c.Annotations, UpgradeStartTimeSourceAnnotation)
 			delete(c.Annotations, UpgradeTypeAnnotation)
 			// EmittedEventsAnnotation is cleared at the start of the NEXT upgrade, not here
 		}
