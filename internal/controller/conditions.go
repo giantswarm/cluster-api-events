@@ -87,8 +87,13 @@ func getWorkloadClusterClient(ctx context.Context, c client.Client, cluster *cap
 	return clientset, nil
 }
 
-// checkMachinePoolNodeVersions connects to workload cluster and checks node versions for a MachinePool
-func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capi.MachinePool, expectedVersion string) (bool, []string, error) {
+// checkMachinePoolNodeVersions connects to workload cluster and checks node versions for a MachinePool.
+// When enforceCreationTime is true, additionally requires every schedulable node to have a
+// CreationTimestamp strictly after upgradeStartTime. This is necessary for releases that
+// don't bump the Kubernetes version (so the kubelet check alone can't distinguish old
+// nodes from new ones) and for externally-managed pools like Karpenter where CAPI status
+// is unreliable.
+func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes.Interface, mp *capi.MachinePool, expectedVersion string, upgradeStartTime time.Time, enforceCreationTime bool) (bool, []string, error) {
 	logger := log.FromContext(ctx)
 
 	// Try primary Giant Swarm label first
@@ -206,6 +211,31 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 					"totalWrongVersionNodes", "10+")
 				break
 			}
+			continue
+		}
+
+		// Creation-time check: catches releases that don't bump kubelet version
+		// (e.g. OS image-only releases) where the kubelet check above is useless.
+		if enforceCreationTime && !node.CreationTimestamp.Time.After(upgradeStartTime) {
+			nodesWithWrongVersion = append(nodesWithWrongVersion,
+				fmt.Sprintf("%s(created %s, before upgrade start %s)",
+					node.Name,
+					node.CreationTimestamp.Time.UTC().Format(time.RFC3339),
+					upgradeStartTime.UTC().Format(time.RFC3339)))
+			allCorrectVersion = false
+
+			logger.Info("Node predates upgrade start - still needs to be rolled",
+				"machinePool", mp.Name,
+				"node", node.Name,
+				"nodeCreatedAt", node.CreationTimestamp.Time,
+				"upgradeStartTime", upgradeStartTime)
+
+			if len(nodesWithWrongVersion) >= 10 {
+				logger.V(1).Info("Truncating wrong version nodes list to prevent memory usage",
+					"machinePool", mp.Name,
+					"totalWrongVersionNodes", "10+")
+				break
+			}
 		}
 	}
 
@@ -229,7 +259,9 @@ func checkMachinePoolNodeVersions(ctx context.Context, workloadClient kubernetes
 // checkMachineDeploymentNodeVersions connects to workload cluster and checks node versions for a MachineDeployment.
 // It lists Machine objects in the management cluster belonging to the MachineDeployment, then for each Machine
 // with a NodeRef, gets the corresponding node from the workload cluster and checks its kubelet version.
-func checkMachineDeploymentNodeVersions(ctx context.Context, mgmtClient client.Client, workloadClient kubernetes.Interface, md *capi.MachineDeployment, expectedVersion string) (bool, []string, error) {
+// When enforceCreationTime is true, additionally requires every Machine to have a CreationTimestamp
+// strictly after upgradeStartTime (catches releases that don't bump the Kubernetes version).
+func checkMachineDeploymentNodeVersions(ctx context.Context, mgmtClient client.Client, workloadClient kubernetes.Interface, md *capi.MachineDeployment, expectedVersion string, upgradeStartTime time.Time, enforceCreationTime bool) (bool, []string, error) {
 	logger := log.FromContext(ctx)
 
 	// List Machine objects in the management cluster belonging to this MachineDeployment
@@ -311,6 +343,32 @@ func checkMachineDeploymentNodeVersions(ctx context.Context, mgmtClient client.C
 				"expectedVersion", expectedVersion)
 
 			// Limit the number of wrong version nodes we track to prevent memory bloat
+			if len(nodesWithWrongVersion) >= 10 {
+				logger.V(1).Info("Truncating wrong version nodes list to prevent memory usage",
+					"machineDeployment", md.Name,
+					"totalWrongVersionNodes", "10+")
+				break
+			}
+			continue
+		}
+
+		// Creation-time check on the Machine (the MachineSet rolls new Machines on upgrade).
+		// Catches releases that don't bump kubelet version (e.g. OS image-only).
+		if enforceCreationTime && !machine.CreationTimestamp.Time.After(upgradeStartTime) {
+			nodesWithWrongVersion = append(nodesWithWrongVersion,
+				fmt.Sprintf("%s(machine created %s, before upgrade start %s)",
+					node.Name,
+					machine.CreationTimestamp.Time.UTC().Format(time.RFC3339),
+					upgradeStartTime.UTC().Format(time.RFC3339)))
+			allCorrectVersion = false
+
+			logger.Info("Machine predates upgrade start - still needs to be rolled",
+				"machineDeployment", md.Name,
+				"machine", machine.Name,
+				"node", node.Name,
+				"machineCreatedAt", machine.CreationTimestamp.Time,
+				"upgradeStartTime", upgradeStartTime)
+
 			if len(nodesWithWrongVersion) >= 10 {
 				logger.V(1).Info("Truncating wrong version nodes list to prevent memory usage",
 					"machineDeployment", md.Name,
@@ -457,8 +515,11 @@ func checkControlPlaneNodeVersions(ctx context.Context, mgmtClient client.Client
 	return allCorrectVersion, nodesWithWrongVersion, nil
 }
 
-// areAllWorkerNodesReady checks if all MachineDeployments and MachinePools are ready
-func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.Cluster) (bool, error) {
+// areAllWorkerNodesReady checks if all MachineDeployments and MachinePools are ready.
+// When enforceCreationTime is true, additionally requires worker nodes/Machines to have been
+// (re)created after upgradeStartTime. Callers must only set this when upgradeStartTime is
+// known to be trustworthy (i.e. stamped at the actual upgrade start, not synthesized).
+func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.Cluster, upgradeStartTime time.Time, enforceCreationTime bool) (bool, error) {
 	machineDeployments := &capi.MachineDeploymentList{}
 	if err := c.List(ctx, machineDeployments, client.InNamespace(cluster.Namespace), client.MatchingLabels{
 		capi.ClusterNameLabel: cluster.Name,
@@ -523,7 +584,7 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 
 		if workloadClient != nil && expectedVersion != "" {
 			var err error
-			allNodesCorrectVersion, nodesWithWrongVersion, err = checkMachineDeploymentNodeVersions(ctx, c, workloadClient, &md, expectedVersion)
+			allNodesCorrectVersion, nodesWithWrongVersion, err = checkMachineDeploymentNodeVersions(ctx, c, workloadClient, &md, expectedVersion, upgradeStartTime, enforceCreationTime)
 			if err != nil {
 				logger := log.FromContext(ctx)
 				logger.V(1).Info("Failed to check node versions in workload cluster for MachineDeployment",
@@ -653,7 +714,7 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 
 		if workloadClient != nil {
 			var err error
-			allNodesCorrectVersion, nodesWithWrongVersion, err = checkMachinePoolNodeVersions(ctx, workloadClient, &mp, expectedVersion)
+			allNodesCorrectVersion, nodesWithWrongVersion, err = checkMachinePoolNodeVersions(ctx, workloadClient, &mp, expectedVersion, upgradeStartTime, enforceCreationTime)
 			if err != nil {
 				log := log.FromContext(ctx)
 				log.V(1).Info("Failed to check node versions in workload cluster for MachinePool",
