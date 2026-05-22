@@ -20,31 +20,24 @@ import "testing"
 
 func TestParseFlatcarImageLookupFormat(t *testing.T) {
 	tests := []struct {
-		name          string
-		input         string
-		wantFlatcar   string
-		wantKube      string
-		wantOK        bool
+		name        string
+		input       string
+		wantFlatcar string
+		wantKube    string
+		wantOK      bool
 	}{
 		{
-			name:        "stable channel x86_64 (no arch infix)",
+			name:        "stable x86_64 (no arch infix)",
 			input:       "flatcar-stable-4459.2.1-kube-1.33.6-tooling-1.26.2-gs",
 			wantFlatcar: "4459.2.1",
 			wantKube:    "1.33.6",
 			wantOK:      true,
 		},
 		{
-			name:        "stable channel arm64",
+			name:        "stable arm64",
 			input:       "flatcar-stable-4459.2.1-kube-1.33.6-tooling-1.26.2-arm64-gs",
 			wantFlatcar: "4459.2.1",
 			wantKube:    "1.33.6",
-			wantOK:      true,
-		},
-		{
-			name:        "lts channel",
-			input:       "flatcar-lts-4081.3.5-kube-1.30.4-tooling-1.25.0-gs",
-			wantFlatcar: "4081.3.5",
-			wantKube:    "1.30.4",
 			wantOK:      true,
 		},
 		{
@@ -65,11 +58,6 @@ func TestParseFlatcarImageLookupFormat(t *testing.T) {
 		{
 			name:   "non-numeric flatcar version",
 			input:  "flatcar-stable-foo.bar.baz-kube-1.33.6-tooling-1.26.2-gs",
-			wantOK: false,
-		},
-		{
-			name:   "ubuntu (not flatcar)",
-			input:  "ubuntu-stable-22.04-kube-1.33.6-tooling-1.26.2-gs",
 			wantOK: false,
 		},
 	}

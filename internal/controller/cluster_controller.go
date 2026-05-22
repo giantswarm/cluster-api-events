@@ -443,7 +443,20 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Additionally skip the check when the release was identified at "Upgrading"
 			// emit time as not actually rolling workers (e.g. chart-only minor release on
 			// external-autoscaler MachinePools that CAPA never auto-rolls).
-			rollsWorkers := cluster.Annotations[UpgradeRollsWorkersAnnotation] != "false"
+			//
+			// Back-fill: upgrades that started before this annotation existed (controller
+			// upgrade mid-cluster-upgrade) have no value. Compute it once now and persist.
+			rollsAnnotation, rollsAnnotationSet := cluster.Annotations[UpgradeRollsWorkersAnnotation]
+			if !rollsAnnotationSet && !isPatchUpgrade {
+				rolls := willUpgradeRollWorkers(ctx, r.Client, cluster)
+				rollsAnnotation = strconv.FormatBool(rolls)
+				if err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+					c.Annotations[UpgradeRollsWorkersAnnotation] = rollsAnnotation
+				}); err != nil {
+					log.Error(err, "Failed to back-fill upgrade-rolls-workers annotation; using computed value for this reconcile only")
+				}
+			}
+			rollsWorkers := rollsAnnotation != "false"
 			enforceWorkerNodeCreationTime := !isPatchUpgrade && startTimeTrustworthy && rollsWorkers
 
 			// ALWAYS verify actual workload cluster node versions for MachinePools
