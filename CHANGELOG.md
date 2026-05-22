@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Emit `Upgraded` for minor/major releases that don't actually roll workers (e.g. chart-only `aws-33.1.4 → aws-33.2.0`). At `Upgrading` time, compare each AWSMachinePool's launch-template `imageLookupFormat` (Flatcar + kubelet) and bootstrap-secret name against existing Machines/Nodes; store the decision in `giantswarm.io/upgrade-rolls-workers` and skip the worker creation-time gate at completion when `false`. Conservative fallback to `true` on any uncertainty.
+
 ## [1.3.2] - 2026-05-15
 
 ### Fixed
