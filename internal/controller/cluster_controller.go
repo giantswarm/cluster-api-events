@@ -255,18 +255,12 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		toVersion := cluster.Labels[ReleaseVersionLabel]
 		upgradeType := determineUpgradeType(previousVersion, toVersion)
 
-		// Patch upgrades never roll nodes; for minor/major we ask the helper
-		// whether the new release actually changes anything that requires
-		// existing nodes to be replaced.
-		rollsWorkers := upgradeType != UpgradeTypePatch && willUpgradeRollWorkers(ctx, r.Client, cluster)
-
-		eventReason := upgradingEventReason(upgradeType, rollsWorkers)
+		eventReason := upgradingEventReason(upgradeType)
 
 		log.Info("Cluster upgrade target changed mid-upgrade",
 			"fromVersion", previousVersion,
 			"toVersion", toVersion,
 			"upgradeType", upgradeType,
-			"rollsWorkers", rollsWorkers,
 			"eventReason", eventReason)
 
 		// Message indicates this is a target change, not a new upgrade
@@ -284,7 +278,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			c.Annotations[UpgradeStartTimeSourceAnnotation] = UpgradeStartTimeSourceEmit
 			// Update upgrade type for the new target
 			c.Annotations[UpgradeTypeAnnotation] = upgradeType.String()
-			c.Annotations[UpgradeRollsWorkersAnnotation] = strconv.FormatBool(rollsWorkers)
+			// Clear the per-upgrade worker-roll decision; the back-fill at the
+			// completion check will recompute it against the new target.
+			delete(c.Annotations, UpgradeRollsWorkersAnnotation)
 			// Clear emitted events since the target changed - control plane may need to upgrade further
 			delete(c.Annotations, EmittedEventsAnnotation)
 		})
@@ -309,18 +305,12 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			toVersion := cluster.Labels[ReleaseVersionLabel]
 			upgradeType := determineUpgradeType(previousVersion, toVersion)
 
-			// Patch upgrades never roll nodes; for minor/major we ask the helper
-			// whether the new release actually changes anything that requires
-			// existing nodes to be replaced.
-			rollsWorkers := upgradeType != UpgradeTypePatch && willUpgradeRollWorkers(ctx, r.Client, cluster)
-
-			eventReason := upgradingEventReason(upgradeType, rollsWorkers)
+			eventReason := upgradingEventReason(upgradeType)
 
 			log.Info("Cluster upgrade started",
 				"fromVersion", previousVersion,
 				"toVersion", toVersion,
 				"upgradeType", upgradeType,
-				"rollsWorkers", rollsWorkers,
 				"eventReason", eventReason)
 
 			// Simple event message with version info only
@@ -338,7 +328,10 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				c.Annotations[UpgradeStartTimeSourceAnnotation] = UpgradeStartTimeSourceEmit
 				// Store upgrade type for later use (to skip UpgradedControlPlane for patches)
 				c.Annotations[UpgradeTypeAnnotation] = upgradeType.String()
-				c.Annotations[UpgradeRollsWorkersAnnotation] = strconv.FormatBool(rollsWorkers)
+				// The worker-roll decision is computed lazily at the completion
+				// check (see UpgradeRollsWorkersAnnotation back-fill), so any
+				// stale value from a previous upgrade is cleared here.
+				delete(c.Annotations, UpgradeRollsWorkersAnnotation)
 				// Set timestamp to current available time to prevent it being reset
 				if readyTransition, ok := conditionTimeStampFromAvailableState(c, capi.AvailableCondition); ok {
 					c.Annotations[LastKnownUpgradeTimestampAnnotation] = readyTransition.UTC().Format(time.RFC3339)
@@ -733,19 +726,17 @@ func determineUpgradeType(fromVersion, toVersion string) UpgradeType {
 }
 
 // upgradingEventReason picks the customer-facing event reason emitted when an
-// upgrade starts. Patch upgrades are always "without node roll". For
-// minor/major upgrades the rollsWorkers signal — derived from comparing the
-// new release's expected node image against what nodes actually run — refines
-// the reason so we don't promise a node replacement on releases that don't
-// actually need one (e.g. a chart-only minor release).
-func upgradingEventReason(upgradeType UpgradeType, rollsWorkers bool) string {
+// upgrade starts. The reason covers ALL nodes (control plane + workers):
+// patch upgrades don't roll any nodes; minor/major upgrades virtually always
+// roll the control plane (KubeadmControlPlane spec changes) even when the
+// worker pools are a no-op. The worker-specific decision is tracked separately
+// via the giantswarm.io/upgrade-rolls-workers annotation and only gates the
+// worker completion check, not the customer message.
+func upgradingEventReason(upgradeType UpgradeType) string {
 	if upgradeType == UpgradeTypePatch {
 		return "UpgradingWithoutNodeRoll"
 	}
-	if rollsWorkers {
-		return "UpgradingWithNodeRoll"
-	}
-	return "UpgradingWithoutNodeRoll"
+	return "UpgradingWithNodeRoll"
 }
 
 func updateClusterAnnotations(client client.Client, cluster *capi.Cluster, modifyFunc func(*capi.Cluster)) error {
