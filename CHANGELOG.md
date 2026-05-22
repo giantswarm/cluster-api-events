@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Grant the controller's ServiceAccount RBAC to `get`/`list`/`watch` `awsmachinepools.infrastructure.cluster.x-k8s.io`. `willUpgradeRollWorkers` reads `AWSMachinePool.spec.awsLaunchTemplate.imageLookupFormat` (and `ami.id`) to decide whether worker nodes need to roll for the in-flight upgrade; without this permission the `Get` failed with a forbidden error and the helper fell back to the conservative `true`, defeating the no-op detection that v1.3.4 was meant to provide.
+
 ## [1.3.4] - 2026-05-22
 
 ### Fixed
