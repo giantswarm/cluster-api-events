@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-05-22
+
 ### Fixed
 
 - Grant the controller's ServiceAccount RBAC to `get`/`list`/`watch` `awsmachinepools.infrastructure.cluster.x-k8s.io`. `willUpgradeRollWorkers` reads `AWSMachinePool.spec.awsLaunchTemplate.imageLookupFormat` (and `ami.id`) to decide whether worker nodes need to roll for the in-flight upgrade; without this permission the `Get` failed with a forbidden error and the helper fell back to the conservative `true`, defeating the no-op detection that v1.3.4 was meant to provide.
@@ -305,7 +307,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.4...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.5...HEAD
+[1.3.5]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.4...v1.3.5
 [1.3.4]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.3...v1.3.4
 [1.3.3]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.1...v1.3.2
