@@ -28,6 +28,7 @@ rules:
     - infrastructure.cluster.x-k8s.io
   resources:
     - awsmachinepools
+    - karpentermachinepools
   verbs:
     - get
     - list

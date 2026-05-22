@@ -932,60 +932,49 @@ func willUpgradeRollWorkers(ctx context.Context, c client.Client, cluster *capi.
 	for _, mp := range machinePools.Items {
 		infraRef := mp.Spec.Template.Spec.InfrastructureRef
 
-		// Non-AWSMachinePool infra (e.g. KarpenterMachinePool) doesn't have a
-		// CAPA launch template we can introspect uniformly. If the pool has no
-		// nodes, there's nothing to roll for it — skip and check other pools.
-		// If it does have nodes, fall back conservatively.
-		if infraRef.Kind != "AWSMachinePool" {
-			poolReplicas := int32(0)
-			if mp.Status.Replicas != nil {
-				poolReplicas = *mp.Status.Replicas
+		// Empty pools (status.Replicas==0) have no nodes that could need rolling,
+		// regardless of infrastructure kind.
+		poolReplicas := int32(0)
+		if mp.Status.Replicas != nil {
+			poolReplicas = *mp.Status.Replicas
+		}
+		if poolReplicas == 0 {
+			logger.V(1).Info("willUpgradeRollWorkers: pool is empty, skipping",
+				"machinePool", mp.Name, "infraKind", infraRef.Kind)
+			continue
+		}
+
+		var expectedFlatcar, expectedKube string
+		switch infraRef.Kind {
+		case "AWSMachinePool":
+			ef, ek, ok := expectedImageFromAWSMachinePool(ctx, c, mp.Namespace, infraRef.Name)
+			if !ok {
+				logger.Info("willUpgradeRollWorkers: cannot derive expected image from AWSMachinePool, assuming node roll",
+					"machinePool", mp.Name)
+				return true
 			}
-			if poolReplicas == 0 {
-				logger.V(1).Info("willUpgradeRollWorkers: non-AWSMachinePool pool is empty, skipping",
-					"machinePool", mp.Name, "infraKind", infraRef.Kind)
-				continue
+			expectedFlatcar, expectedKube = ef, ek
+		case "KarpenterMachinePool":
+			ef, ek, ok := expectedImageFromKarpenterMachinePool(ctx, c, mp.Namespace, infraRef.Name)
+			if !ok {
+				logger.Info("willUpgradeRollWorkers: cannot derive expected image from KarpenterMachinePool, assuming node roll",
+					"machinePool", mp.Name)
+				return true
 			}
-			logger.Info("willUpgradeRollWorkers: non-AWSMachinePool pool has nodes, assuming node roll",
+			expectedFlatcar, expectedKube = ef, ek
+		default:
+			logger.Info("willUpgradeRollWorkers: unknown infrastructure kind, assuming node roll",
 				"machinePool", mp.Name, "infraKind", infraRef.Kind, "replicas", poolReplicas)
-			return true
-		}
-
-		awsmp := &unstructured.Unstructured{}
-		awsmp.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "infrastructure.cluster.x-k8s.io",
-			Version: "v1beta2",
-			Kind:    "AWSMachinePool",
-		})
-		if err := c.Get(ctx, types.NamespacedName{Namespace: mp.Namespace, Name: infraRef.Name}, awsmp); err != nil {
-			logger.Info("willUpgradeRollWorkers: failed to get AWSMachinePool, assuming node roll",
-				"machinePool", mp.Name, "awsmp", infraRef.Name, "error", err)
-			return true
-		}
-
-		// Hard-set AMI: expected OS isn't derivable without an AWS API call.
-		amiID, _, _ := unstructured.NestedString(awsmp.Object, "spec", "awsLaunchTemplate", "ami", "id")
-		if amiID != "" {
-			logger.Info("willUpgradeRollWorkers: AWSMachinePool uses hard-set ami.id, assuming node roll",
-				"machinePool", mp.Name, "amiID", amiID)
-			return true
-		}
-
-		imageLookupFormat, _, _ := unstructured.NestedString(awsmp.Object, "spec", "awsLaunchTemplate", "imageLookupFormat")
-		expectedFlatcar, expectedKube, parseOK := parseFlatcarImageLookupFormat(imageLookupFormat)
-		if !parseOK {
-			logger.Info("willUpgradeRollWorkers: unparseable imageLookupFormat, assuming node roll",
-				"machinePool", mp.Name, "imageLookupFormat", imageLookupFormat)
 			return true
 		}
 
 		// Note: we intentionally do not compare Machine.Spec.Bootstrap.DataSecretName
 		// here. For MachinePool-owned Machines CAPI doesn't populate that field
 		// per-Machine (the secret reference lives on the MachinePool spec only),
-		// so the comparison would always trigger a false positive.
-		// If a chart bump changes the user-data hash, CAPA refreshes the ASG
-		// instances; the in-flight roll is already caught by the cluster's
-		// RollingOut condition (clusterNotRollingOut guard in the completion check).
+		// so the comparison would always trigger a false positive. If a chart bump
+		// changes the user-data hash, CAPA / Karpenter refreshes instances; the
+		// in-flight roll is already caught by the cluster's RollingOut condition
+		// (clusterNotRollingOut guard in the completion check).
 
 		nodes, err := listNodesForMachinePool(ctx, workloadClient, mp.Name)
 		if err != nil {
@@ -1023,6 +1012,106 @@ func willUpgradeRollWorkers(ctx context.Context, c client.Client, cluster *capi.
 	logger.Info("willUpgradeRollWorkers: all worker nodes already at expected kubelet+Flatcar versions, no node roll required",
 		"cluster", cluster.Name)
 	return false
+}
+
+// getInfraObject fetches an infrastructure CR by group+kind, using the REST
+// mapper to discover the preferred API version. This avoids hard-coding a
+// version that may bump (e.g. KarpenterMachinePool v1alpha1 → v1beta1).
+func getInfraObject(ctx context.Context, c client.Client, namespace, name, group, kind string) (*unstructured.Unstructured, error) {
+	mapping, err := c.RESTMapper().RESTMapping(schema.GroupKind{Group: group, Kind: kind})
+	if err != nil {
+		return nil, fmt.Errorf("resolve REST mapping for %s/%s: %w", group, kind, err)
+	}
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(mapping.GroupVersionKind)
+	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
+// expectedImageFromAWSMachinePool fetches the AWSMachinePool and derives the
+// expected Flatcar + kubelet versions from its launch template's
+// imageLookupFormat. Returns ok=false on fetch error, hard-set ami.id (cannot
+// be verified without an AWS API call), or unparseable lookup format.
+func expectedImageFromAWSMachinePool(ctx context.Context, c client.Client, namespace, name string) (flatcar, kube string, ok bool) {
+	logger := log.FromContext(ctx)
+	awsmp, err := getInfraObject(ctx, c, namespace, name, "infrastructure.cluster.x-k8s.io", "AWSMachinePool")
+	if err != nil {
+		logger.Info("expectedImageFromAWSMachinePool: failed to get AWSMachinePool",
+			"awsmp", name, "error", err)
+		return "", "", false
+	}
+	if amiID, _, _ := unstructured.NestedString(awsmp.Object, "spec", "awsLaunchTemplate", "ami", "id"); amiID != "" {
+		logger.Info("expectedImageFromAWSMachinePool: hard-set ami.id, cannot derive expected image",
+			"awsmp", name, "amiID", amiID)
+		return "", "", false
+	}
+	imageLookupFormat, _, _ := unstructured.NestedString(awsmp.Object, "spec", "awsLaunchTemplate", "imageLookupFormat")
+	flatcar, kube, ok = parseFlatcarImageLookupFormat(imageLookupFormat)
+	if !ok {
+		logger.Info("expectedImageFromAWSMachinePool: unparseable imageLookupFormat",
+			"awsmp", name, "imageLookupFormat", imageLookupFormat)
+	}
+	return
+}
+
+// expectedImageFromKarpenterMachinePool fetches the KarpenterMachinePool and
+// derives the expected Flatcar + kubelet versions from the first ami selector
+// term whose `name` field is set to a Giant Swarm flatcar lookup string. Any
+// term with a hard-set `id` or `alias` blocks the derivation since we'd then
+// be unsure which AMI Karpenter actually picks.
+func expectedImageFromKarpenterMachinePool(ctx context.Context, c client.Client, namespace, name string) (flatcar, kube string, ok bool) {
+	logger := log.FromContext(ctx)
+	kmp, err := getInfraObject(ctx, c, namespace, name, "infrastructure.cluster.x-k8s.io", "KarpenterMachinePool")
+	if err != nil {
+		logger.Info("expectedImageFromKarpenterMachinePool: failed to get KarpenterMachinePool",
+			"kmp", name, "error", err)
+		return "", "", false
+	}
+	terms, _, _ := unstructured.NestedSlice(kmp.Object, "spec", "ec2NodeClass", "amiSelectorTerms")
+	if len(terms) == 0 {
+		logger.Info("expectedImageFromKarpenterMachinePool: no amiSelectorTerms", "kmp", name)
+		return "", "", false
+	}
+	for _, t := range terms {
+		term, isMap := t.(map[string]interface{})
+		if !isMap {
+			continue
+		}
+		// Any term that pins by id/alias defeats the derivation: Karpenter may
+		// pick that AMI and we can't verify its content without an AWS lookup.
+		if id, _ := term["id"].(string); id != "" {
+			logger.Info("expectedImageFromKarpenterMachinePool: amiSelectorTerm has hard-set id",
+				"kmp", name, "amiID", id)
+			return "", "", false
+		}
+		if alias, _ := term["alias"].(string); alias != "" {
+			logger.Info("expectedImageFromKarpenterMachinePool: amiSelectorTerm has alias",
+				"kmp", name, "alias", alias)
+			return "", "", false
+		}
+	}
+	for _, t := range terms {
+		term, isMap := t.(map[string]interface{})
+		if !isMap {
+			continue
+		}
+		nameField, _ := term["name"].(string)
+		if nameField == "" {
+			continue
+		}
+		flatcar, kube, ok = parseFlatcarImageLookupFormat(nameField)
+		if ok {
+			return
+		}
+		logger.Info("expectedImageFromKarpenterMachinePool: unparseable amiSelectorTerm name",
+			"kmp", name, "name", nameField)
+		return "", "", false
+	}
+	logger.Info("expectedImageFromKarpenterMachinePool: no amiSelectorTerm with parseable name",
+		"kmp", name)
+	return "", "", false
 }
 
 // normalizeKubeletVersion prepends "v" if missing so a node's kubeletVersion
