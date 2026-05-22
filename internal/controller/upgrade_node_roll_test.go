@@ -98,24 +98,19 @@ func TestNormalizeKubeletVersion(t *testing.T) {
 
 func TestUpgradingEventReason(t *testing.T) {
 	tests := []struct {
-		name         string
-		upgradeType  UpgradeType
-		rollsWorkers bool
-		want         string
+		name        string
+		upgradeType UpgradeType
+		want        string
 	}{
-		{"patch with rolls=true ignored", UpgradeTypePatch, true, "UpgradingWithoutNodeRoll"},
-		{"patch with rolls=false", UpgradeTypePatch, false, "UpgradingWithoutNodeRoll"},
-		{"minor with rolls=true", UpgradeTypeMinor, true, "UpgradingWithNodeRoll"},
-		{"minor no-op (rolls=false)", UpgradeTypeMinor, false, "UpgradingWithoutNodeRoll"},
-		{"major with rolls=true", UpgradeTypeMajor, true, "UpgradingWithNodeRoll"},
-		{"major no-op (rolls=false)", UpgradeTypeMajor, false, "UpgradingWithoutNodeRoll"},
-		{"unknown defaults conservatively if rolls=true", UpgradeTypeUnknown, true, "UpgradingWithNodeRoll"},
-		{"unknown with rolls=false", UpgradeTypeUnknown, false, "UpgradingWithoutNodeRoll"},
+		{"patch", UpgradeTypePatch, "UpgradingWithoutNodeRoll"},
+		{"minor (CP rolls even if workers don't)", UpgradeTypeMinor, "UpgradingWithNodeRoll"},
+		{"major", UpgradeTypeMajor, "UpgradingWithNodeRoll"},
+		{"unknown defaults to with node roll", UpgradeTypeUnknown, "UpgradingWithNodeRoll"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := upgradingEventReason(tt.upgradeType, tt.rollsWorkers); got != tt.want {
-				t.Errorf("upgradingEventReason(%v, %v) = %q, want %q", tt.upgradeType, tt.rollsWorkers, got, tt.want)
+			if got := upgradingEventReason(tt.upgradeType); got != tt.want {
+				t.Errorf("upgradingEventReason(%v) = %q, want %q", tt.upgradeType, got, tt.want)
 			}
 		})
 	}
