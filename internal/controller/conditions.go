@@ -3,10 +3,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -848,6 +852,218 @@ func areAllWorkerNodesReady(ctx context.Context, c client.Client, cluster *capi.
 	}
 
 	return allReady, nil
+}
+
+// flatcarImageLookupFormatRegex matches imageLookupFormat strings rendered by
+// the giantswarm/cluster-aws Helm chart, e.g.
+//
+//	flatcar-stable-4459.2.1-kube-1.33.6-tooling-1.26.2-gs
+//	flatcar-stable-4459.2.1-kube-1.33.6-tooling-1.26.2-arm64-gs
+//
+// Capture groups: Flatcar OS version, Kubernetes version.
+var flatcarImageLookupFormatRegex = regexp.MustCompile(`^flatcar-[a-z]+-([0-9]+\.[0-9]+\.[0-9]+)-kube-([0-9]+\.[0-9]+\.[0-9]+)-tooling-[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9]+)?-gs$`)
+
+// parseFlatcarImageLookupFormat extracts the Flatcar OS version and Kubernetes
+// version from a chart-rendered imageLookupFormat. Returns ok=false if the
+// string doesn't match the expected pattern.
+func parseFlatcarImageLookupFormat(s string) (flatcarVersion, kubeVersion string, ok bool) {
+	m := flatcarImageLookupFormatRegex.FindStringSubmatch(s)
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
+
+// willUpgradeRollWorkers reports whether the in-flight upgrade is expected to
+// roll existing worker Nodes. It compares the expected Flatcar+kubelet
+// versions (derived from each AWSMachinePool's launch template) against what
+// the observed Nodes actually run. If any worker MachinePool has a node whose
+// kubelet or OS image differs from expected, a roll is required.
+//
+// Returns true (conservative) when state is uncertain:
+//   - workload cluster client unavailable
+//   - non-CAPA infrastructure kind (e.g. KarpenterMachinePool)
+//   - hard-set ami.id on the AWSMachinePool (expected OS not derivable here)
+//   - missing/unparseable imageLookupFormat
+//   - any error fetching nodes or AWSMachinePools
+//
+// This is called once at "Upgrading" emit time so the same decision drives both
+// the customer-facing event reason and the completion-time creation-time check.
+func willUpgradeRollWorkers(ctx context.Context, c client.Client, cluster *capi.Cluster) bool {
+	logger := log.FromContext(ctx)
+
+	machinePools := &capi.MachinePoolList{}
+	if err := c.List(ctx, machinePools, client.InNamespace(cluster.Namespace), client.MatchingLabels{
+		capi.ClusterNameLabel: cluster.Name,
+	}); err != nil {
+		logger.Info("willUpgradeRollWorkers: failed to list MachinePools, assuming node roll", "error", err)
+		return true
+	}
+
+	machineDeployments := &capi.MachineDeploymentList{}
+	if err := c.List(ctx, machineDeployments, client.InNamespace(cluster.Namespace), client.MatchingLabels{
+		capi.ClusterNameLabel: cluster.Name,
+	}); err != nil {
+		logger.Info("willUpgradeRollWorkers: failed to list MachineDeployments, assuming node roll", "error", err)
+		return true
+	}
+
+	// MachineDeployments are rolled by CAPI on any spec change, so we can't
+	// reliably predict "no roll" for them from a snapshot. Be conservative.
+	if len(machineDeployments.Items) > 0 {
+		logger.V(1).Info("willUpgradeRollWorkers: MachineDeployments present, assuming node roll",
+			"machineDeploymentCount", len(machineDeployments.Items))
+		return true
+	}
+
+	// No workers at all: nothing to roll.
+	if len(machinePools.Items) == 0 {
+		logger.V(1).Info("willUpgradeRollWorkers: no worker MachinePools, no node roll required")
+		return false
+	}
+
+	workloadClient, err := getWorkloadClusterClient(ctx, c, cluster)
+	if err != nil {
+		logger.Info("willUpgradeRollWorkers: workload client unavailable, assuming node roll", "error", err)
+		return true
+	}
+
+	inspectedAny := false
+	for _, mp := range machinePools.Items {
+		infraRef := mp.Spec.Template.Spec.InfrastructureRef
+		if infraRef.Kind != "AWSMachinePool" {
+			logger.Info("willUpgradeRollWorkers: non-AWSMachinePool infra, assuming node roll",
+				"machinePool", mp.Name, "infraKind", infraRef.Kind)
+			return true
+		}
+
+		awsmp := &unstructured.Unstructured{}
+		awsmp.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "infrastructure.cluster.x-k8s.io",
+			Version: "v1beta2",
+			Kind:    "AWSMachinePool",
+		})
+		if err := c.Get(ctx, types.NamespacedName{Namespace: mp.Namespace, Name: infraRef.Name}, awsmp); err != nil {
+			logger.Info("willUpgradeRollWorkers: failed to get AWSMachinePool, assuming node roll",
+				"machinePool", mp.Name, "awsmp", infraRef.Name, "error", err)
+			return true
+		}
+
+		// Hard-set AMI: expected OS isn't derivable without an AWS API call.
+		amiID, _, _ := unstructured.NestedString(awsmp.Object, "spec", "awsLaunchTemplate", "ami", "id")
+		if amiID != "" {
+			logger.Info("willUpgradeRollWorkers: AWSMachinePool uses hard-set ami.id, assuming node roll",
+				"machinePool", mp.Name, "amiID", amiID)
+			return true
+		}
+
+		imageLookupFormat, _, _ := unstructured.NestedString(awsmp.Object, "spec", "awsLaunchTemplate", "imageLookupFormat")
+		expectedFlatcar, expectedKube, parseOK := parseFlatcarImageLookupFormat(imageLookupFormat)
+		if !parseOK {
+			logger.Info("willUpgradeRollWorkers: unparseable imageLookupFormat, assuming node roll",
+				"machinePool", mp.Name, "imageLookupFormat", imageLookupFormat)
+			return true
+		}
+
+		// Bootstrap data secret name embeds a content hash; a change means the
+		// chart re-rendered KubeadmConfig (kubelet flags, taints, ignition, etc.)
+		// and CAPA will refresh ASG instances on the resulting user-data change.
+		expectedBootstrap := ""
+		if mp.Spec.Template.Spec.Bootstrap.DataSecretName != nil {
+			expectedBootstrap = *mp.Spec.Template.Spec.Bootstrap.DataSecretName
+		}
+
+		// List Machines owned by this MachinePool so we can verify their
+		// bootstrap secret matches the current spec.
+		machines := &capi.MachineList{}
+		if err := c.List(ctx, machines, client.InNamespace(mp.Namespace), client.MatchingLabels{
+			capi.MachinePoolNameLabel: mp.Name,
+		}); err != nil {
+			logger.Info("willUpgradeRollWorkers: failed to list Machines, assuming node roll",
+				"machinePool", mp.Name, "error", err)
+			return true
+		}
+		if expectedBootstrap != "" {
+			for _, m := range machines.Items {
+				observedBootstrap := ""
+				if m.Spec.Bootstrap.DataSecretName != nil {
+					observedBootstrap = *m.Spec.Bootstrap.DataSecretName
+				}
+				if observedBootstrap != expectedBootstrap {
+					logger.Info("willUpgradeRollWorkers: Machine bootstrap secret differs, node roll required",
+						"machinePool", mp.Name, "machine", m.Name,
+						"observedBootstrap", observedBootstrap, "expectedBootstrap", expectedBootstrap)
+					return true
+				}
+			}
+		}
+
+		nodes, err := listNodesForMachinePool(ctx, workloadClient, mp.Name)
+		if err != nil {
+			logger.Info("willUpgradeRollWorkers: failed to list nodes, assuming node roll",
+				"machinePool", mp.Name, "error", err)
+			return true
+		}
+		if len(nodes) == 0 {
+			logger.V(1).Info("willUpgradeRollWorkers: pool has no nodes, no roll needed for it",
+				"machinePool", mp.Name)
+			continue
+		}
+
+		inspectedAny = true
+		for _, node := range nodes {
+			observedKubelet := node.Status.NodeInfo.KubeletVersion
+			observedOSImage := node.Status.NodeInfo.OSImage
+			kubeletOK := normalizeKubeletVersion(observedKubelet) == "v"+expectedKube
+			osOK := strings.Contains(observedOSImage, expectedFlatcar)
+			if !kubeletOK || !osOK {
+				logger.Info("willUpgradeRollWorkers: node would need to roll",
+					"machinePool", mp.Name, "node", node.Name,
+					"observedKubelet", observedKubelet, "expectedKubelet", "v"+expectedKube,
+					"observedOSImage", observedOSImage, "expectedFlatcar", expectedFlatcar)
+				return true
+			}
+		}
+	}
+
+	if !inspectedAny {
+		logger.V(1).Info("willUpgradeRollWorkers: all worker pools empty, no node roll required")
+		return false
+	}
+
+	logger.Info("willUpgradeRollWorkers: all worker nodes already at expected kubelet+Flatcar versions, no node roll required",
+		"cluster", cluster.Name)
+	return false
+}
+
+// normalizeKubeletVersion prepends "v" if missing so a node's kubeletVersion
+// can be compared against an unprefixed semver parsed from imageLookupFormat.
+func normalizeKubeletVersion(v string) string {
+	if v == "" || strings.HasPrefix(v, "v") {
+		return v
+	}
+	return "v" + v
+}
+
+// listNodesForMachinePool returns all nodes belonging to the given MachinePool.
+// Tries the giantswarm machine-pool label first, then falls back to the
+// Karpenter nodepool label. Schedulable-only filtering is intentionally omitted:
+// we want to inspect every node that exists for the pool.
+func listNodesForMachinePool(ctx context.Context, workloadClient kubernetes.Interface, mpName string) ([]corev1.Node, error) {
+	primary := fmt.Sprintf("giantswarm.io/machine-pool=%s", mpName)
+	nodes, err := workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: primary})
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes.Items) > 0 {
+		return nodes.Items, nil
+	}
+	fallback := fmt.Sprintf("karpenter.sh/nodepool=%s", mpName)
+	nodes, err = workloadClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: fallback})
+	if err != nil {
+		return nil, err
+	}
+	return nodes.Items, nil
 }
 
 // areAnyWorkerNodesUpgrading checks if any MachineDeployments or MachinePools are upgrading
