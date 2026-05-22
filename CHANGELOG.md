@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-05-22
+
 ### Fixed
 
 - Emit `Upgraded` for minor/major releases that don't actually roll workers (e.g. chart-only `aws-33.1.4 → aws-33.2.0`). At `Upgrading` time, compare each AWSMachinePool's launch-template `imageLookupFormat` (Flatcar + kubelet) and bootstrap-secret name against existing Machines/Nodes; store the decision in `giantswarm.io/upgrade-rolls-workers` and skip the worker creation-time gate at completion when `false`. Conservative fallback to `true` on any uncertainty.
@@ -293,7 +295,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.3...HEAD
+[1.3.3]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/giantswarm/cluster-api-events/compare/v1.2.7...v1.3.0
