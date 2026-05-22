@@ -433,23 +433,30 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// the kubelet version check is satisfied immediately, causing a premature
 			// "Upgraded" event. We only enforce this when upgradeStartTime is trustworthy;
 			// otherwise we'd wait forever for "newer" nodes after a controller restart.
-			// Additionally skip the check when the release was identified at "Upgrading"
-			// emit time as not actually rolling workers (e.g. chart-only minor release on
-			// external-autoscaler MachinePools that CAPA never auto-rolls).
+			// Additionally skip the check when the release was identified as not actually
+			// rolling workers (e.g. chart-only minor release on external-autoscaler
+			// MachinePools that CAPA never auto-rolls).
 			//
-			// Back-fill: upgrades that started before this annotation existed (controller
-			// upgrade mid-cluster-upgrade) have no value. Compute it once now and persist.
-			rollsAnnotation, rollsAnnotationSet := cluster.Annotations[UpgradeRollsWorkersAnnotation]
-			if !rollsAnnotationSet && !isPatchUpgrade {
-				rolls := willUpgradeRollWorkers(ctx, r.Client, cluster)
-				rollsAnnotation = strconv.FormatBool(rolls)
-				if err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
-					c.Annotations[UpgradeRollsWorkersAnnotation] = rollsAnnotation
-				}); err != nil {
-					log.Error(err, "Failed to back-fill upgrade-rolls-workers annotation; using computed value for this reconcile only")
+			// We only persist the annotation when the computed value is "false" — that's
+			// the definitive "no roll needed" decision and it's the only state we want to
+			// cache to avoid recomputing every reconcile. Missing or "true" → recompute,
+			// which makes the helper self-healing: any prior conservative "true" from an
+			// earlier buggy code path is automatically reconsidered next reconcile.
+			rollsWorkers := true
+			if !isPatchUpgrade {
+				if cluster.Annotations[UpgradeRollsWorkersAnnotation] == "false" {
+					rollsWorkers = false
+				} else {
+					rollsWorkers = willUpgradeRollWorkers(ctx, r.Client, cluster)
+					if !rollsWorkers {
+						if err := updateClusterAnnotations(r.Client, cluster, func(c *capi.Cluster) {
+							c.Annotations[UpgradeRollsWorkersAnnotation] = "false"
+						}); err != nil {
+							log.Error(err, "Failed to persist upgrade-rolls-workers=false; will recompute next reconcile")
+						}
+					}
 				}
 			}
-			rollsWorkers := rollsAnnotation != "false"
 			enforceWorkerNodeCreationTime := !isPatchUpgrade && startTimeTrustworthy && rollsWorkers
 
 			// ALWAYS verify actual workload cluster node versions for MachinePools

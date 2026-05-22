@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `willUpgradeRollWorkers` was returning conservative `true` even when worker pools were a true no-op: empty `KarpenterMachinePool`s triggered an unconditional non-AWS-infra early return, and the bootstrap-secret comparison always tripped because CAPI doesn't populate `Machine.Spec.Bootstrap.DataSecretName` on MachinePool-owned Machines. Non-AWS pools are now skipped when they have zero replicas (and only assumed-rolling when they actually have nodes), and the unreliable bootstrap-secret check is removed (in-flight rolls are already caught by the `clusterNotRollingOut` guard). The `giantswarm.io/upgrade-rolls-workers` annotation is now persisted only when the decision is `false`, so any previously-cached conservative `true` is recomputed on the next reconcile (self-healing).
+
 ## [1.3.3] - 2026-05-22
 
 ### Fixed
