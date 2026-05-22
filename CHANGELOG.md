@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.6] - 2026-05-22
+
 ### Fixed
 
 - Extend `willUpgradeRollWorkers` to evaluate `KarpenterMachinePool` pools the same way as `AWSMachinePool`. Previously a populated Karpenter pool short-circuited the helper to `true`, so clusters mixing AWS and Karpenter pools (e.g. `peu01`) couldn't fire `Upgraded` even when the upgrade was a no-op for every pool's nodes. The helper now parses `spec.ec2NodeClass.amiSelectorTerms[].name` (same Flatcar lookup format as `AWSMachinePool.spec.awsLaunchTemplate.imageLookupFormat`) and applies the same kubelet + OS comparison. Any term with hard-set `id` or `alias`, or any unparseable term, falls back to conservative `true`. RBAC for `karpentermachinepools.infrastructure.cluster.x-k8s.io` is also added. Infrastructure CRD versions are now resolved through the client's REST mapper instead of being hard-coded, so a future bump (e.g. KarpenterMachinePool `v1alpha1` → `v1beta1`) won't silently break the helper.
@@ -311,7 +313,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2024-08-13
 
-[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.5...HEAD
+[Unreleased]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.6...HEAD
+[1.3.6]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.5...v1.3.6
 [1.3.5]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.4...v1.3.5
 [1.3.4]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.3...v1.3.4
 [1.3.3]: https://github.com/giantswarm/cluster-api-events/compare/v1.3.2...v1.3.3
