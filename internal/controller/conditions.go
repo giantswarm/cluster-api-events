@@ -931,9 +931,23 @@ func willUpgradeRollWorkers(ctx context.Context, c client.Client, cluster *capi.
 	inspectedAny := false
 	for _, mp := range machinePools.Items {
 		infraRef := mp.Spec.Template.Spec.InfrastructureRef
+
+		// Non-AWSMachinePool infra (e.g. KarpenterMachinePool) doesn't have a
+		// CAPA launch template we can introspect uniformly. If the pool has no
+		// nodes, there's nothing to roll for it — skip and check other pools.
+		// If it does have nodes, fall back conservatively.
 		if infraRef.Kind != "AWSMachinePool" {
-			logger.Info("willUpgradeRollWorkers: non-AWSMachinePool infra, assuming node roll",
-				"machinePool", mp.Name, "infraKind", infraRef.Kind)
+			poolReplicas := int32(0)
+			if mp.Status.Replicas != nil {
+				poolReplicas = *mp.Status.Replicas
+			}
+			if poolReplicas == 0 {
+				logger.V(1).Info("willUpgradeRollWorkers: non-AWSMachinePool pool is empty, skipping",
+					"machinePool", mp.Name, "infraKind", infraRef.Kind)
+				continue
+			}
+			logger.Info("willUpgradeRollWorkers: non-AWSMachinePool pool has nodes, assuming node roll",
+				"machinePool", mp.Name, "infraKind", infraRef.Kind, "replicas", poolReplicas)
 			return true
 		}
 
@@ -965,38 +979,13 @@ func willUpgradeRollWorkers(ctx context.Context, c client.Client, cluster *capi.
 			return true
 		}
 
-		// Bootstrap data secret name embeds a content hash; a change means the
-		// chart re-rendered KubeadmConfig (kubelet flags, taints, ignition, etc.)
-		// and CAPA will refresh ASG instances on the resulting user-data change.
-		expectedBootstrap := ""
-		if mp.Spec.Template.Spec.Bootstrap.DataSecretName != nil {
-			expectedBootstrap = *mp.Spec.Template.Spec.Bootstrap.DataSecretName
-		}
-
-		// List Machines owned by this MachinePool so we can verify their
-		// bootstrap secret matches the current spec.
-		machines := &capi.MachineList{}
-		if err := c.List(ctx, machines, client.InNamespace(mp.Namespace), client.MatchingLabels{
-			capi.MachinePoolNameLabel: mp.Name,
-		}); err != nil {
-			logger.Info("willUpgradeRollWorkers: failed to list Machines, assuming node roll",
-				"machinePool", mp.Name, "error", err)
-			return true
-		}
-		if expectedBootstrap != "" {
-			for _, m := range machines.Items {
-				observedBootstrap := ""
-				if m.Spec.Bootstrap.DataSecretName != nil {
-					observedBootstrap = *m.Spec.Bootstrap.DataSecretName
-				}
-				if observedBootstrap != expectedBootstrap {
-					logger.Info("willUpgradeRollWorkers: Machine bootstrap secret differs, node roll required",
-						"machinePool", mp.Name, "machine", m.Name,
-						"observedBootstrap", observedBootstrap, "expectedBootstrap", expectedBootstrap)
-					return true
-				}
-			}
-		}
+		// Note: we intentionally do not compare Machine.Spec.Bootstrap.DataSecretName
+		// here. For MachinePool-owned Machines CAPI doesn't populate that field
+		// per-Machine (the secret reference lives on the MachinePool spec only),
+		// so the comparison would always trigger a false positive.
+		// If a chart bump changes the user-data hash, CAPA refreshes the ASG
+		// instances; the in-flight roll is already caught by the cluster's
+		// RollingOut condition (clusterNotRollingOut guard in the completion check).
 
 		nodes, err := listNodesForMachinePool(ctx, workloadClient, mp.Name)
 		if err != nil {
