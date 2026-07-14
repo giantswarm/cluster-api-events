@@ -4,44 +4,32 @@ orbs:
   architect: giantswarm/architect@9.5.5
 
 workflows:
-  package-and-push-chart-on-tag:
+  build:
     jobs:
-      - architect/go-build:
-          context: architect
-          name: go-build
-          binary: cluster-api-events
-          resource_class: xlarge
-          filters:
-            tags:
-              only: /^v.*/
-
       - architect/push-to-registries:
-          context: architect
           name: push-to-registries
-          requires:
-            - go-build
+          context: architect
           filters:
-            # Trigger the job also on git tag.
-            tags:
-              only: /^v.*/
             branches:
               ignore:
                 - main
                 - master
+            tags:
+              only: /^v.*/
 
       - architect/push-to-app-catalog:
+          name: push-to-app-catalog
           context: architect
           executor: app-build-suite
-          name: push-to-app-catalog
+          chart: cluster-api-events
           app_catalog: control-plane-catalog
           app_catalog_test: control-plane-test-catalog
-          chart: cluster-api-events
-          requires:
-            - go-build
           filters:
-            tags:
-              only: /^v.*/
             branches:
               ignore:
                 - main
                 - master
+            tags:
+              only: /^v.*/
+          requires:
+            - push-to-registries
