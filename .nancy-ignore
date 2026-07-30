@@ -1,1 +1,2 @@
 CVE-2026-63209 until=2026-08-28 # github.com/klauspost/compress@v1.18.0
+CVE-2026-5160 until=2026-08-29 # github.com/yuin/goldmark@v1.4.13
