@@ -5,7 +5,7 @@ go 1.27.1
 require (
 	github.com/blang/semver/v4 v4.0.0
 	github.com/giantswarm/microerror v0.4.1
-	github.com/onsi/ginkgo/v2 v2.32.1
+	github.com/onsi/ginkgo/v2 v2.32.2
 	github.com/onsi/gomega v1.43.0
 	go.uber.org/zap v1.28.0
 	k8s.io/api v0.37.0
