@@ -6,7 +6,7 @@ require (
 	github.com/blang/semver/v4 v4.0.0
 	github.com/giantswarm/microerror v0.4.1
 	github.com/onsi/ginkgo/v2 v2.33.0
-	github.com/onsi/gomega v1.43.1
+	github.com/onsi/gomega v1.44.0
 	go.uber.org/zap v1.28.0
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1
