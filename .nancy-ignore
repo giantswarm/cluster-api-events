@@ -1,1 +1,6 @@
 CVE-2026-5160 until=2026-10-30 # github.com/yuin/goldmark@v1.4.13
+CVE-2026-78660 until=2026-11-13 # golang.org/x/net@v0.58.0
+CVE-2026-78663 until=2026-11-13 # golang.org/x/net@v0.58.0
+CVE-2026-78669 until=2026-11-13 # golang.org/x/net@v0.58.0
+CVE-2026-97032 until=2026-11-13 # golang.org/x/net@v0.58.0
+CVE-2026-78659 until=2026-11-13 # golang.org/x/net@v0.58.0
